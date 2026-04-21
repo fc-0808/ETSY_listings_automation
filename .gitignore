@@ -1,0 +1,25 @@
+# Secrets — never commit
+.env
+.env.*
+*.pem
+**/credentials*
+**/secrets*
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+
+# Python (if you add it later)
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Node (if you add it later)
+node_modules/
+
+# Local data
+*.sqlite
+*.db
