@@ -1,0 +1,7 @@
+# Pin below 1.40 on Windows: newer releases pull in `jiter`, which often fails with
+# "DLL load failed while importing jiter" unless MSVC runtime / wheels match your Python.
+openai>=1.30.0,<1.40.0
+# openai 1.3x expects httpx < 0.28 (0.28 removed `proxies` kwarg used by older httpx wrappers).
+httpx>=0.24.1,<0.28.0
+cloudinary>=1.40.0
+openpyxl>=3.1.0

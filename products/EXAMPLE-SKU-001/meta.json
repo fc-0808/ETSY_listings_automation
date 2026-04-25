@@ -1,0 +1,76 @@
+{
+  "_comment": "Copy this file into every product folder and fill it in. Delete _comment before production runs.",
+
+  "parent_sku": "EXAMPLE-SKU-001",
+  "sku": "EXAMPLE-SKU-001",
+
+  "price": 24.99,
+  "quantity": 50,
+
+  "type": "physical",
+
+  "category": "Clothing > Women's Clothing > Tops & Tees > T-Shirts",
+
+  "who_made": "i_did",
+  "is_made_to_order": false,
+  "year_made": "2020_2024",
+  "is_vintage": false,
+  "is_supply": false,
+  "is_taxable": true,
+  "auto_renew": true,
+  "is_customizable": false,
+  "is_personalizable": false,
+  "personalization_is_required": false,
+  "personalization_instructions": "",
+  "personalization_char_count_max": 256,
+
+  "style_1": "Modern",
+  "style_2": "",
+
+  "shipping_profile_id": "REPLACE_WITH_YOUR_SHIPPING_PROFILE_ID",
+  "return_policy_id": "REPLACE_WITH_YOUR_RETURN_POLICY_ID",
+  "readiness_state_id": "",
+
+  "dimensions_unit": "in",
+  "length": "",
+  "width": "",
+  "height": "",
+  "weight": "",
+  "weight_unit": "oz",
+
+  "category_properties": {
+    "_primary_color": "Clear",
+    "_secondary_color": "Pink",
+    "_occasion": "",
+    "_holiday": "",
+    "_material": "Silicone",
+    "_glitter": "",
+    "_built_in_stand": ""
+  },
+
+  "keyword_seeds": ["handmade", "unique gift", "birthday present"],
+  "banned_phrases": [],
+  "materials": ["100% cotton"],
+  "target_buyer": "women who love minimalist style",
+  "extra_notes": "Optional notes the AI should factor into the description",
+
+  "_VARIATIONS_NOTE": "Delete this key before production. Remove entirely to disable variations (single-row listing). Keep to generate one row per style×model combination.",
+  "variations": {
+    "option1_name": "Style",
+    "styles": [
+      {"value": "Case+Grip+Charm", "price": 409.89, "quantity": 3, "sku_code": "CGM"},
+      {"value": "Case+Grip",        "price": 350.11, "quantity": 3, "sku_code": "CG"},
+      {"value": "Case+Charm",       "price": 350.11, "quantity": 3, "sku_code": "CC"},
+      {"value": "Case Only",        "price": 261.86, "quantity": 3, "sku_code": "CO"},
+      {"value": "Grip Only",        "price": 170.76, "quantity": 3, "sku_code": "GO"},
+      {"value": "Charm Only",       "price": 113.82, "quantity": 3, "sku_code": "CH"}
+    ],
+    "option2_name": "Phone Model",
+    "models": [
+      "iPhone 17 Pro Max", "iPhone 17 Pro", "iPhone 17",
+      "iPhone 16 Pro Max", "iPhone 16 Pro", "iPhone 16",
+      "iPhone 15 Pro Max", "iPhone 15 Pro", "iPhone 15",
+      "iPhone 14 Pro Max", "iPhone 14 Pro", "iPhone 14/13"
+    ]
+  }
+}

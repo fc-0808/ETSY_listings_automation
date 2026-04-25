@@ -23,3 +23,14 @@ node_modules/
 # Local data
 *.sqlite
 *.db
+
+# Pipeline outputs (generated files, run logs)
+output/
+
+# Product folders with real images/data (keep only the EXAMPLE in git)
+products/*/
+!products/EXAMPLE-SKU-001/
+!products/EXAMPLE-SKU-001/meta.json
+
+# Temp files from Shop Uploader
+temp_*.xlsx
