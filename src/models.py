@@ -198,6 +198,8 @@ class ProductMeta:
             errors.append("shipping_profile_id is required for physical listings")
         if self.type == "physical" and not self.return_policy_id:
             errors.append("return_policy_id is required for physical listings")
+        if self.type == "physical" and not self.readiness_state_id:
+            errors.append("readiness_state_id is required for physical listings (processing time profile ID from Etsy)")
         return errors
 
 
@@ -208,6 +210,21 @@ class GeneratedCopy:
     tags: list[str]
     primary_color: str = ""    # Etsy-allowed value determined from images
     secondary_color: str = ""  # Etsy-allowed value determined from images
+    # Maps each Style → LIST of 1-based image indices (best/most representative first).
+    # e.g. {"Case+Grip": [2, 5], "Case Only": [3, 7], "Case+Grip+Charm": [1], "Charm Only": []}
+    # Used ONLY for variation linked images.
+    style_image_mapping: dict = None  # type: ignore[assignment]
+    # Per-image structured facts returned by AI (decouples vision recognition from logic).
+    # Each entry: {"index": int, "has_grip": bool, "has_charm": bool, "has_case": bool,
+    #              "is_edge_or_profile": bool, "thumbnail_quality": int (1-10),
+    #              "is_held_in_hand": bool, "shows_back_of_case": bool}
+    image_analysis: list = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.style_image_mapping is None:
+            self.style_image_mapping = {}
+        if self.image_analysis is None:
+            self.image_analysis = []
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -234,16 +251,32 @@ class ProductPackage:
     video_path: Path | None = None
     video_url: str = ""
     generated_copy: GeneratedCopy | None = None
+    # Filename order is always trusted — the user renames images manually
+    # to set the exact display order before running the pipeline.
+    filename_order_trusted: bool = True
 
     @property
     def is_ready(self) -> bool:
         return bool(self.image_urls) and self.generated_copy is not None
 
 
+_NATURAL_SORT_RE = re.compile(r'^(\d+)')
+
+
+def _natural_sort_key(path: Path) -> tuple:
+    """Sort images numerically by the leading number in the filename stem.
+
+    Examples: 1.PNG→1, 10.PNG→10, 01_IMG_1284.PNG→1, IMG_foo.PNG→∞
+    This ensures 1, 2, 3 … 9, 10 order instead of 1, 10, 2, 3 … 9.
+    """
+    m = _NATURAL_SORT_RE.match(path.stem)
+    return (int(m.group(1)), path.name) if m else (float("inf"), path.name)
+
+
 def discover_images(folder: Path) -> list[Path]:
     images: list[Path] = sorted(
         [p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS],
-        key=lambda p: p.name,
+        key=_natural_sort_key,
     )
     return images[:10]
 

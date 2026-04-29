@@ -65,14 +65,19 @@ def load_all_packages(products_dir: Path) -> tuple[list[ProductPackage], list[st
             errors.append(f"[{folder.name}] No images found — skipping")
             continue
 
+        log.info(
+            "Loaded %s (%d image(s)%s)",
+            folder.name, len(images),
+            ", 1 video" if discover_video(folder) else "",
+        )
+
         packages.append(ProductPackage(
             folder=folder,
             meta=meta,
             image_paths=images,
             video_path=discover_video(folder),
+            filename_order_trusted=True,
         ))
-        log.info("Loaded %s (%d image(s)%s)", folder.name, len(images),
-                 ", 1 video" if discover_video(folder) else "")
 
     return packages, errors
 
@@ -89,9 +94,9 @@ def _parse_meta(raw: dict[str, Any], folder_name: str) -> ProductMeta:
         quantity=int(raw["quantity"]),
         type=raw.get("type", "physical").lower(),
         category=raw.get("category", ""),
-        who_made=raw.get("who_made", "i_did"),
+        who_made=raw.get("who_made", "someone_else"),
         is_made_to_order=bool(raw.get("is_made_to_order", False)),
-        year_made=str(raw.get("year_made", "2020_2024")),
+        year_made=str(raw.get("year_made", "2024")),
         is_vintage=bool(raw.get("is_vintage", False)),
         is_supply=bool(raw.get("is_supply", False)),
         is_taxable=bool(raw.get("is_taxable", True)),

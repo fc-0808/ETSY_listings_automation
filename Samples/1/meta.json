@@ -1,0 +1,76 @@
+{
+  "parent_sku": "Y2K-S001",
+  "sku": "Y2K-S001",
+
+  "type": "physical",
+  "category": "Phone Cases (873)",
+
+  "who_made": "someone_else",
+  "is_made_to_order": false,
+  "year_made": "2024",
+  "is_vintage": false,
+  "is_supply": false,
+  "is_taxable": true,
+  "auto_renew": true,
+  "is_customizable": false,
+  "is_personalizable": false,
+  "personalization_is_required": false,
+  "personalization_instructions": "",
+  "personalization_char_count_max": 256,
+
+  "style_1": "Kawaii",
+  "style_2": "Y2K",
+
+  "shipping_profile_id": "298715350841",
+  "return_policy_id": "1462249129999",
+  "readiness_state_id": "1461134928050",
+
+  "dimensions_unit": "in",
+  "length": "",
+  "width": "",
+  "height": "",
+  "weight": "",
+  "weight_unit": "oz",
+
+  "production_partner_1": "5556766",
+  "shop_section_id": "57228761",
+  "featured_rank": "",
+
+  "category_properties": {
+    "_primary_color": "Yellow",
+    "_secondary_color": "Clear",
+    "_occasion": "",
+    "_holiday": "",
+    "_material": "Silicone",
+    "_glitter": "",
+    "_built_in_stand": ""
+  },
+
+  "keyword_seeds": ["kawaii dog", "little dog", "pear charm", "magsafe", "y2k iphone case", "cute dog case"],
+  "banned_phrases": [],
+  "materials": ["Silicone"],
+  "target_buyer": "young women who love kawaii Y2K aesthetic phone accessories",
+  "extra_notes": "Yellow clear case with Little Dog Xueli design. Comes with a circular MagSafe grip ring and a yellow pear-shaped acrylic charm. Also includes a beaded phone strap charm.",
+
+  "price": 409.89,
+  "quantity": 3,
+
+  "variations": {
+    "option1_name": "Phone Model",
+    "models": [
+      "iPhone 17 Pro Max", "iPhone 17 Pro", "iPhone 17",
+      "iPhone 16 Pro Max", "iPhone 16 Pro", "iPhone 16",
+      "iPhone 15 Pro Max", "iPhone 15 Pro", "iPhone 15",
+      "iPhone 14 Pro Max", "iPhone 14 Pro", "iPhone 14/13"
+    ],
+    "option2_name": "Styles",
+    "styles": [
+      {"value": "Case+Grip+Charm", "price": 409.89, "quantity": 3, "sku_code": "CGM"},
+      {"value": "Case+Grip",        "price": 350.11, "quantity": 3, "sku_code": "CG"},
+      {"value": "Case+Charm",       "price": 350.11, "quantity": 3, "sku_code": "CC"},
+      {"value": "Case Only",        "price": 261.86, "quantity": 3, "sku_code": "CO"},
+      {"value": "Grip Only",        "price": 170.76, "quantity": 3, "sku_code": "GO"},
+      {"value": "Charm Only",       "price": 113.82, "quantity": 3, "sku_code": "CH"}
+    ]
+  }
+}

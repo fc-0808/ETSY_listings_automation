@@ -125,10 +125,14 @@ def upload_product_video(
 
 def _public_id(folder: str, sku: str, position: int, path: Path) -> str:
     """
-    Deterministic Cloudinary public_id.
-    Format: <folder>/<sku>/<position>_<sha1-prefix-of-filename>
-    This ensures repeated runs don't create duplicates.
+    Deterministic Cloudinary public_id based on FILE CONTENT hash.
+
+    We hash the actual image bytes (not the filename) so that renaming a file
+    — e.g. IMG_1288.PNG → 01_IMG_1288.PNG — never creates a duplicate Cloudinary
+    asset. Same pixels = same hash = same public_id = no re-upload.
+
+    Format: <folder>/<sku>/<position>_<sha1-prefix-of-content>
     """
-    name_hash = hashlib.sha1(path.name.encode()).hexdigest()[:8]
+    content_hash = hashlib.sha1(path.read_bytes()).hexdigest()[:8]
     safe_sku = sku.replace(" ", "_")
-    return f"{folder}/{safe_sku}/{position:02d}_{name_hash}"
+    return f"{folder}/{safe_sku}/{position:02d}_{content_hash}"

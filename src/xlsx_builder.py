@@ -218,6 +218,13 @@ def build_batched_xlsx_files(
     return all_paths, all_warnings
 
 
+def _order_listing_images(
+    image_urls: list[str],
+) -> list[str]:
+    """Return image URLs in the order the seller set by renaming files."""
+    return [u for u in image_urls if u][:10]
+
+
 def _write_header(ws, columns: list[str]) -> None:
     ws.append(columns)
     for col_idx, _ in enumerate(columns, start=1):
@@ -237,8 +244,11 @@ def _build_rows(pkg: ProductPackage, cfg: Config, columns: list[str]) -> list[li
     meta = pkg.meta
     copy = pkg.generated_copy
     tags = (copy.tags + [""] * 13)[:13]
-    urls = (pkg.image_urls + [""] * 10)[:10]
 
+    # ── Image ordering — seller-defined by filename order ─────────────────────
+    raw_urls = list(pkg.image_urls)
+    ordered_urls = _order_listing_images(raw_urls)
+    urls = (ordered_urls + [""] * 10)[:10]
     # ── Base listing fields (shared by every row in this product) ─────────────
     listing_fields: dict[str, object] = {
         "listing_id": "",
@@ -334,18 +344,36 @@ def _build_rows(pkg: ProductPackage, cfg: Config, columns: list[str]) -> list[li
 
     # ── 2D variations: one row per (model × style) combination ──────────────
     # option1 = Phone Model (12), option2 = Styles (6) → 72 rows per product
-    # Prices/Quantities driven by Styles (per Etsy "vary for each" setting)
-    # Linked images attached to Styles (per Etsy "Link photos to this variation")
+    # Prices/Quantities/SKUs driven by Styles only.
+    # Linked images: AI determined which image best represents each Style.
     rows: list[list] = []
     first_row = True
 
-    # Map style index → image URL for variation-linked images
-    # We assign the product images sequentially to each style that has one.
-    image_urls_for_style: dict[str, str] = {}
-    for idx, style in enumerate(v.styles):
-        url_idx = idx  # image_1=CGM, image_2=CG, image_3=CC, image_4=CO, etc.
-        if url_idx < len(pkg.image_urls):
-            image_urls_for_style[style.value] = pkg.image_urls[url_idx]
+    # Build style → image URL mapping from AI-determined indices
+    # style_image_mapping: {"Case+Grip+Charm": 1, "Case Only": 3, ...}
+    ai_mapping: dict[str, int | None] = {}
+    if copy.style_image_mapping:
+        ai_mapping = copy.style_image_mapping
+
+    # Build style_name → (url, position) lookup.
+    # RULE: never use index 1 (the thumbnail) as a linked image.
+    # The linked_image_position MUST equal the image's own 1-based index in image_urls
+    # so that Shop Uploader's deduplication collapses it at exactly the right slot,
+    # preserving the seller's file order throughout all positions.
+    # Charm Only is ALWAYS excluded from linked images.
+    def get_linked_url_and_pos(style_name: str) -> tuple[str, str]:
+        if style_name == "Charm Only":
+            return "", ""
+        indices = ai_mapping.get(style_name, [])
+        if isinstance(indices, int):
+            indices = [indices]
+        for idx in indices:
+            if idx == 1:
+                continue  # never link to index 1 — it is the thumbnail
+            zero = idx - 1
+            if 0 <= zero < len(pkg.image_urls):
+                return pkg.image_urls[zero], str(idx)  # position = image's own 1-based index
+        return "", ""
 
     for model in v.models:
         for style in v.styles:
@@ -366,10 +394,12 @@ def _build_rows(pkg: ProductPackage, cfg: Config, columns: list[str]) -> list[li
             row["option2_name"] = v.option2_name   # "Styles"
             row["option2_value"] = style.value
 
-            # Link variation image to this style option
-            linked_url = image_urls_for_style.get(style.value, "")
+            # Linked image position = the image's own sequential index.
+            # This guarantees the image lands at the same slot it already occupies
+            # as image_N, so deduplication preserves strict file order end-to-end.
+            linked_url, link_pos = get_linked_url_and_pos(style.value)
             row["linked_image_url"] = linked_url
-            row["linked_image_position"] = 1 if linked_url else ""
+            row["linked_image_position"] = link_pos
             row["linked_image_for_option"] = v.option2_name if linked_url else ""  # "Styles"
 
             # Only first row carries full listing-level data

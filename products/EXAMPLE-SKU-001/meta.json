@@ -11,9 +11,9 @@
 
   "category": "Clothing > Women's Clothing > Tops & Tees > T-Shirts",
 
-  "who_made": "i_did",
+  "who_made": "someone_else",
   "is_made_to_order": false,
-  "year_made": "2020_2024",
+  "year_made": "2024",
   "is_vintage": false,
   "is_supply": false,
   "is_taxable": true,
@@ -29,7 +29,7 @@
 
   "shipping_profile_id": "REPLACE_WITH_YOUR_SHIPPING_PROFILE_ID",
   "return_policy_id": "REPLACE_WITH_YOUR_RETURN_POLICY_ID",
-  "readiness_state_id": "",
+  "readiness_state_id": "REPLACE_WITH_YOUR_READINESS_STATE_ID",
 
   "dimensions_unit": "in",
   "length": "",

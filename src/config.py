@@ -45,9 +45,28 @@ class Config:
     batch_size: int = field(default_factory=lambda: int(os.getenv("BATCH_SIZE", "200")))
     # Human-readable shop/batch label used in output filenames (e.g. "Y2KASEshop")
     run_label: str = field(default_factory=lambda: os.getenv("RUN_LABEL", ""))
+    # Shop display name used in the listing description Promise section and run label.
+    # Set SHOP_NAME=Y2KASEshop in your .env (or override per-run).
+    shop_name: str = field(default_factory=lambda: os.getenv("SHOP_NAME", "Y2KASEshop"))
+    # Comma-separated brand identity tags forced into every listing's tag list.
+    # Default is derived from shop_name; override with BRAND_TAGS=tag1,tag2 in .env.
+    brand_tags: list = field(default_factory=lambda: _default_brand_tags())
 
     def __post_init__(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _default_brand_tags() -> list:
+    raw = os.getenv("BRAND_TAGS", "").strip()
+    if raw:
+        return [t.strip().lower()[:20] for t in raw.split(",") if t.strip()]
+    # Derive two compact brand tags from SHOP_NAME
+    name = os.getenv("SHOP_NAME", "Y2KASEshop").lower().replace(" ", "")
+    short = name[:20]
+    # If name is long, also include a prefix slice as second tag
+    prefix = name[:7] if len(name) > 7 else name
+    tags = list(dict.fromkeys([short, prefix]))  # deduplicated, order-preserved
+    return [t for t in tags if t][:2]
 
 
 def _require(key: str) -> str:

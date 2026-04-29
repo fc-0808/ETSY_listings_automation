@@ -8,6 +8,7 @@ from src.ai_generator import generate_copy_for_all
 from src.config import Config
 from src.image_uploader import upload_all_packages
 from src.loader import load_all_packages
+from src.models import ProductPackage
 from src.report import print_run_report, save_json_log
 from src.xlsx_builder import build_batched_xlsx_files
 
