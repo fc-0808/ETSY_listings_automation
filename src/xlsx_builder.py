@@ -138,6 +138,7 @@ def build_xlsx(
         ("linked_image_url", "action"),
         ("linked_image_position", "action"),
         ("linked_image_for_option", "action"),
+        ("linked_image_alt_text", "action"),   # SEO: alt text for linked image
         ("production_partner_1", "action"),
         ("shop_section_id", "action"),
         ("featured_rank", "action"),
@@ -153,6 +154,8 @@ def build_xlsx(
         ("option2_changes_price",    "option2_name"),
         ("option2_changes_quantity", "option2_name"),
         ("option2_changes_sku",      "option2_name"),
+        # Controls whether a variation is purchaseable / visible to buyers
+        ("variation_is_enabled",     "option1_name"),
     ]:
         if extra_col not in cols:
             insert_at = cols.index(before_col) if before_col in cols else len(cols)
@@ -225,6 +228,92 @@ def _order_listing_images(
     return [u for u in image_urls if u][:10]
 
 
+def _derive_mapping_from_analysis(
+    image_analysis: list[dict],
+    image_urls: list[str],
+) -> dict[str, list[int]]:
+    """
+    Fallback: build a style → [1-based image indices] mapping from the per-image
+    boolean facts that the AI returned in image_analysis.
+
+    This runs when style_image_mapping is all-empty (AI classified images but
+    didn't fill the mapping, e.g. due to model limitations).
+    Index 1 is the thumbnail and is intentionally excluded from linked images.
+    """
+    mapping: dict[str, list[int]] = {
+        "Case+Grip+Charm": [], "Case+Grip": [], "Case+Charm": [],
+        "Case Only": [], "Grip Only": [], "Charm Only": [],
+    }
+    n = len(image_urls)
+    for img in sorted(image_analysis, key=lambda x: x.get("index", 0)):
+        idx = img.get("index", 0)
+        if idx < 2 or idx > n:   # skip index 1 (thumbnail) and out-of-range
+            continue
+        has_grip  = bool(img.get("has_grip",  False))
+        has_charm = bool(img.get("has_charm", False))
+        has_case  = bool(img.get("has_case",  True))
+        edge      = bool(img.get("is_edge_or_profile", False))
+        if has_case:
+            if has_grip and has_charm:
+                mapping["Case+Grip+Charm"].append(idx)
+            elif has_grip:
+                mapping["Case+Grip"].append(idx)
+            elif has_charm:
+                mapping["Case+Charm"].append(idx)
+            elif not edge:
+                mapping["Case Only"].append(idx)
+        # standalone grip or charm — omit from linked images
+    # Keep only styles with at least one image
+    return {k: v for k, v in mapping.items() if v}
+
+
+def _build_image_alt_texts(
+    image_analysis: list[dict],
+    parent_sku: str,
+) -> dict[str, str]:
+    """
+    Build image_alt_text_1..10 from Phase 1 per-image descriptions.
+    Per Shop Uploader docs: image_alt_text_N corresponds to image_N and
+    improves Etsy/Google SEO. We use the Phase 1 description as the base
+    and truncate to a sensible length (max 250 chars per Etsy guideline).
+    """
+    result: dict[str, str] = {}
+    if not image_analysis:
+        return result
+    # Build index → description lookup
+    desc_by_idx = {
+        img.get("index", 0): img.get("description", "")
+        for img in image_analysis
+        if img.get("description")
+    }
+    for pos in range(1, 11):   # image_1 through image_10
+        desc = desc_by_idx.get(pos, "")
+        if desc:
+            result[f"image_alt_text_{pos}"] = desc[:250].strip()
+    return result
+
+
+def _get_alt_text_for_linked(
+    linked_url: str,
+    image_urls: list[str],
+    image_analysis: list[dict],
+) -> str:
+    """
+    Return Phase 1 description for the image that was linked, trimmed for alt text.
+    Matches by URL position to get the correct 1-based index.
+    """
+    if not linked_url or not image_analysis:
+        return ""
+    try:
+        pos = image_urls.index(linked_url) + 1  # 1-based
+    except ValueError:
+        return ""
+    for img in image_analysis:
+        if img.get("index") == pos:
+            return str(img.get("description", ""))[:250].strip()
+    return ""
+
+
 def _write_header(ws, columns: list[str]) -> None:
     ws.append(columns)
     for col_idx, _ in enumerate(columns, start=1):
@@ -262,10 +351,16 @@ def _build_rows(pkg: ProductPackage, cfg: Config, columns: list[str]) -> list[li
         "_secondary_color": copy.secondary_color or meta.category_properties.secondary_color,
         "_occasion": meta.category_properties.occasion,
         "_holiday": meta.category_properties.holiday,
-        # Phone Cases category attributes (present after regenerating template for Phone Cases)
-        "_material": meta.category_properties.material,
-        "_glitter": meta.category_properties.glitter,
-        "_built_in_stand": meta.category_properties.built_in_stand,
+        # Multi-material attribute (new template column replacing legacy _material)
+        "_material_multi": meta.category_properties.material,
+        # Phone Case category feature attributes — read from meta.json category_properties
+        "_built-in_grip":          meta.category_properties.built_in_grip,
+        "_built-in_stand":         meta.category_properties.built_in_stand,
+        "_card_slot":              meta.category_properties.card_slot,
+        "_electronics_case_theme": meta.category_properties.electronics_case_theme,
+        "_glitter":                meta.category_properties.glitter,
+        "_liquid":                 meta.category_properties.liquid,
+        "_pattern":                meta.category_properties.pattern,
         "_deprecated_diameter": "", "_deprecated_dimensions": "",
         "_deprecated_fabric": "", "_deprecated_finish": "",
         "_deprecated_flavor": "", "_deprecated_height": "",
@@ -278,6 +373,10 @@ def _build_rows(pkg: ProductPackage, cfg: Config, columns: list[str]) -> list[li
         "image_4": urls[3], "image_5": urls[4], "image_6": urls[5],
         "image_7": urls[6], "image_8": urls[7], "image_9": urls[8],
         "image_10": urls[9],
+        # Alt text per numbered image — sourced from Phase 1 per-image descriptions.
+        # Improves Etsy SEO (image alt text is indexed by Etsy and Google Shopping).
+        # Per Shop Uploader docs: image_alt_text_N corresponds to image_N.
+        **_build_image_alt_texts(copy.image_analysis, meta.parent_sku),
         "shipping_profile_id": meta.shipping_profile_id,
         "readiness_state_id": meta.readiness_state_id,
         "return_policy_id": meta.return_policy_id,
@@ -310,6 +409,7 @@ def _build_rows(pkg: ProductPackage, cfg: Config, columns: list[str]) -> list[li
         "linked_image_url": "",
         "linked_image_position": "",
         "linked_image_for_option": "",
+        "linked_image_alt_text": "",
         # Production partner — same for every listing in this shop
         "production_partner_1": meta.production_partner_1,
         # Shop section — "iPhone Cases" section
@@ -327,7 +427,74 @@ def _build_rows(pkg: ProductPackage, cfg: Config, columns: list[str]) -> list[li
         "option2_changes_price":    "TRUE",
         "option2_changes_quantity": "TRUE",
         "option2_changes_sku":      "TRUE",
+        # Enabled by default; disabled per-row for styles the product doesn't offer
+        "variation_is_enabled":     "TRUE",
     }
+
+    # ── Determine which styles this product actually offers ────────────────────
+    # Primary signal: style_image_mapping — if the AI mapped at least one image to
+    # a grip-containing style then the product sells grip bundles.
+    # A non-empty dict with ALL-EMPTY lists means AI returned no classifications,
+    # so fall through to image_analysis regardless.
+    sim = copy.style_image_mapping or {}
+    _sim_has_data = any(bool(v) for v in sim.values())  # True only if ANY style has images
+    ia = copy.image_analysis or []
+
+    if _sim_has_data:
+        product_has_grip  = bool(sim.get("Case+Grip", []) or sim.get("Case+Grip+Charm", []))
+        product_has_charm = bool(sim.get("Case+Charm", []) or sim.get("Case+Grip+Charm", []))
+        # Belt-and-suspenders: if the style map shows no grip/charm but the per-image
+        # analysis explicitly flags them (has_grip/has_charm=True), trust the image
+        # analysis over the mapping — the mapping may have missed an edge case.
+        ia_has_grip  = any(img.get("has_grip",  False) for img in ia)
+        ia_has_charm = any(img.get("has_charm", False) for img in ia)
+        if not product_has_grip and ia_has_grip:
+            log.warning(
+                "[%s] style_map shows no grip images but image_analysis disagrees "
+                "— overriding product_has_grip to True",
+                meta.parent_sku,
+            )
+            product_has_grip = True
+        if not product_has_charm and ia_has_charm:
+            log.warning(
+                "[%s] style_map shows no charm images but image_analysis disagrees "
+                "— overriding product_has_charm to True",
+                meta.parent_sku,
+            )
+            product_has_charm = True
+    else:
+        # AI didn't classify any images — derive from per-image boolean facts
+        product_has_grip  = any(img.get("has_grip",  False) for img in ia)
+        product_has_charm = any(img.get("has_charm", False) for img in ia)
+
+    # Styles that require a grip to exist; hidden when product has no grip
+    _GRIP_REQUIRED_STYLES  = {"Case+Grip+Charm", "Case+Grip", "Grip Only"}
+    # Styles that require a charm to exist; hidden when product has no charm
+    _CHARM_REQUIRED_STYLES = {"Case+Grip+Charm", "Case+Charm", "Charm Only"}
+
+    def _variation_enabled(style_value: str) -> str:
+        if not product_has_grip  and style_value in _GRIP_REQUIRED_STYLES:
+            return "FALSE"
+        if not product_has_charm and style_value in _CHARM_REQUIRED_STYLES:
+            return "FALSE"
+        return "TRUE"
+
+    # Diagnostic log — shows the final enabled/disabled state for every style so
+    # any mismatch with Etsy is immediately visible in the run log.
+    _ALL_STYLE_VALUES = [
+        "Case+Grip+Charm", "Case+Grip", "Case+Charm",
+        "Case Only", "Grip Only", "Charm Only",
+    ]
+    log.info(
+        "[%s] Variation enablement (grip=%s charm=%s): %s",
+        meta.parent_sku,
+        product_has_grip,
+        product_has_charm,
+        "  ".join(
+            f"{s}={'ON' if _variation_enabled(s) == 'TRUE' else 'OFF'}"
+            for s in _ALL_STYLE_VALUES
+        ),
+    )
 
     v = meta.variations
     if v is None:
@@ -349,11 +516,29 @@ def _build_rows(pkg: ProductPackage, cfg: Config, columns: list[str]) -> list[li
     rows: list[list] = []
     first_row = True
 
-    # Build style → image URL mapping from AI-determined indices
-    # style_image_mapping: {"Case+Grip+Charm": 1, "Case Only": 3, ...}
-    ai_mapping: dict[str, int | None] = {}
-    if copy.style_image_mapping:
-        ai_mapping = copy.style_image_mapping
+    # Build style → image index list mapping.
+    # Priority 1: AI-provided style_image_mapping (only keep styles with ≥1 image).
+    # Priority 2: Derive from per-image image_analysis boolean facts.
+    # "Case Only (edge)" images are merged as low-priority fallback for "Case Only".
+    sim = copy.style_image_mapping or {}
+    ai_mapping: dict[str, list[int]] = {k: v for k, v in sim.items() if v}
+
+    # Merge "Case Only (edge)" into "Case Only" when no nice-angle case images exist
+    edge_indices: list[int] = sim.get("Case Only (edge)") or []  # type: ignore[assignment]
+    if isinstance(edge_indices, int):
+        edge_indices = [edge_indices]
+    if edge_indices and not ai_mapping.get("Case Only"):
+        ai_mapping["Case Only"] = edge_indices
+
+    # Fallback: derive from image_analysis booleans when AI mapping is all-empty
+    if not ai_mapping and copy.image_analysis:
+        ai_mapping = _derive_mapping_from_analysis(copy.image_analysis, pkg.image_urls)
+        if ai_mapping:
+            log.info(
+                "[%s] style_image_mapping was empty — derived from image_analysis: %s",
+                meta.parent_sku,
+                {k: v for k, v in ai_mapping.items()},
+            )
 
     # Build style_name → (url, position) lookup.
     # RULE: never use index 1 (the thumbnail) as a linked image.
@@ -395,19 +580,40 @@ def _build_rows(pkg: ProductPackage, cfg: Config, columns: list[str]) -> list[li
             row["option2_value"] = style.value
 
             # Linked image position = the image's own sequential index.
-            # This guarantees the image lands at the same slot it already occupies
-            # as image_N, so deduplication preserves strict file order end-to-end.
+            # Per Shop Uploader docs, positions are relative — setting position N
+            # to match the same URL as image_N causes Shop Uploader to deduplicate
+            # rather than insert the image twice, preserving the seller's file order.
             linked_url, link_pos = get_linked_url_and_pos(style.value)
-            row["linked_image_url"] = linked_url
+            row["linked_image_url"]      = linked_url
             row["linked_image_position"] = link_pos
-            row["linked_image_for_option"] = v.option2_name if linked_url else ""  # "Styles"
 
-            # Only first row carries full listing-level data
+            # ── CRITICAL: linked_image_for_option must ALWAYS be set to enable ──
+            # "Link photos to this variation" in Shop Uploader / Etsy.
+            # Per official docs: this column holds the OPTION NAME ("Styles"),
+            # not the option value. Even rows without a linked image must carry
+            # this name so the toggle stays ON for the whole listing.
+            row["linked_image_for_option"] = v.option2_name  # always "Styles"
+
+            # Alt text for the linked image — use Phase 1 description of the
+            # best image for this style. Good for Etsy/Google SEO.
+            row["linked_image_alt_text"] = (
+                _get_alt_text_for_linked(linked_url, pkg.image_urls, copy.image_analysis)
+                if linked_url else ""
+            )
+
+            # Disable variation for styles the product doesn't offer
+            row["variation_is_enabled"] = _variation_enabled(style.value)
+
             if not first_row:
                 for blank_col in (
                     "title", "description", "video_1",
                     "image_1", "image_2", "image_3", "image_4", "image_5",
                     "image_6", "image_7", "image_8", "image_9", "image_10",
+                    # alt texts only on first row (same as numbered images)
+                    "image_alt_text_1", "image_alt_text_2", "image_alt_text_3",
+                    "image_alt_text_4", "image_alt_text_5", "image_alt_text_6",
+                    "image_alt_text_7", "image_alt_text_8", "image_alt_text_9",
+                    "image_alt_text_10",
                     "tag_1", "tag_2", "tag_3", "tag_4", "tag_5", "tag_6",
                     "tag_7", "tag_8", "tag_9", "tag_10", "tag_11", "tag_12", "tag_13",
                 ):

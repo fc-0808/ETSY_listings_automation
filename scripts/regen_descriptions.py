@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 from src.config import load_config
 from src.ai_generator import generate_copy_for_all
 from src.loader import load_all_packages
-from src.report import print_run_report, save_json_log
+from src.report import print_run_report, save_json_log, clean_old_output
 from src.xlsx_builder import build_batched_xlsx_files
 
 import openpyxl
@@ -94,8 +94,7 @@ def main() -> None:
         if not products_dir.is_absolute():
             products_dir = ROOT / products_dir
     else:
-        samples = ROOT / "Samples"
-        products_dir = samples if samples.exists() else cfg.products_dir
+        products_dir = cfg.products_dir  # defaults to input/
     log.info("Products dir: %s", products_dir)
 
     # Phase 1: Load packages
@@ -150,7 +149,7 @@ def main() -> None:
         output_files=output_files,
         rows_total=len(ready_for_xlsx),
     )
-    save_json_log(
+    log_file = save_json_log(
         load_errors=load_errors,
         upload_errors=[],
         ai_errors=ai_errors,
@@ -159,6 +158,10 @@ def main() -> None:
         rows_total=len(ready_for_xlsx),
         log_dir=cfg.output_dir,
     )
+
+    # Keep only the files written in this run — delete everything older.
+    clean_old_output(cfg.output_dir, keep_files=list(output_files) + [log_file])
+
     log.info("Done. %d XLSX file(s) written.", len(output_files))
 
 

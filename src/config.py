@@ -34,7 +34,8 @@ class Config:
     cloudinary_folder: str = field(default_factory=lambda: os.getenv("CLOUDINARY_FOLDER", "etsy_products"))
 
     # ── Pipeline defaults ────────────────────────────────────────────────────
-    products_dir: Path = field(default_factory=lambda: ROOT_DIR / "products")
+    # Drop product folders into input/ — that is the default working directory.
+    products_dir: Path = field(default_factory=lambda: ROOT_DIR / "input")
     output_dir: Path = field(default_factory=lambda: ROOT_DIR / "output")
     # Shop Uploader workbook whose row 1 defines column order (per shop / category set).
     # Override with SHOP_UPLOADER_TEMPLATE=my_template.xlsx (relative to repo root or absolute).
@@ -54,6 +55,7 @@ class Config:
 
     def __post_init__(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.products_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _default_brand_tags() -> list:

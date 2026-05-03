@@ -42,7 +42,7 @@ def load_all_packages(products_dir: Path) -> tuple[list[ProductPackage], list[st
             continue
 
         try:
-            raw = json.loads(meta_path.read_text(encoding="utf-8"))
+            raw = json.loads(meta_path.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError as exc:
             errors.append(f"[{folder.name}] meta.json parse error: {exc} — skipping")
             continue

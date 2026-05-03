@@ -8,6 +8,32 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# Glob patterns for files the pipeline manages in the output folder.
+_OUTPUT_XLSX_GLOB = "UPLOAD_TO_SHOPUPLOADER__*.xlsx"
+_OUTPUT_LOG_GLOB  = "RUN_LOG__*.json"
+
+
+def clean_old_output(output_dir: Path, keep_files: list[Path]) -> None:
+    """Delete all pipeline-managed files in output_dir except those in keep_files.
+
+    Called after a successful run so only the latest XLSX + log remain,
+    keeping the output folder uncluttered.
+    """
+    keep = {p.resolve() for p in keep_files}
+    removed: list[str] = []
+    for pattern in (_OUTPUT_XLSX_GLOB, _OUTPUT_LOG_GLOB):
+        for f in output_dir.glob(pattern):
+            if f.resolve() not in keep:
+                try:
+                    f.unlink()
+                    removed.append(f.name)
+                except OSError as exc:
+                    log.warning("Could not remove old output file %s: %s", f.name, exc)
+    if removed:
+        log.info("Cleaned %d old output file(s): %s", len(removed), ", ".join(removed))
+    else:
+        log.debug("Output folder already clean — nothing to remove.")
+
 
 def print_run_report(
     load_errors: list[str],

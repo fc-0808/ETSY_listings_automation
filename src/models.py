@@ -19,24 +19,32 @@ class CategoryProperties:
     Category-specific attribute columns (_underscore_columns) for Phone Cases.
     These map to the _underscore_columns in the Shop Uploader template.
 
-    Phone Cases category (taxonomy 2848) supports:
-      _primary_color   — e.g. "Clear", "Pink", "Purple" (Etsy allowed values)
-      _secondary_color — e.g. "Pink", "White"
-      _occasion        — e.g. "Birthday"  (optional)
-      _holiday         — e.g. "Christmas" (optional)
-      _material        — free-text material tag (e.g. "Silicone")
-                         NOTE: this is a material *tag* on the listing, not a
-                         variation. The buyer-visible Materials field uses this.
-      _glitter         — "Yes" / "No"
-      _built_in_stand  — "Yes" / "No"
+    Phone Cases category supports:
+      _primary_color          — e.g. "Clear", "Pink", "Purple"
+      _secondary_color        — e.g. "Pink", "White"
+      _occasion               — e.g. "Birthday" (optional)
+      _holiday                — e.g. "Christmas" (optional)
+      _material_multi         — e.g. "Silicone", "TPU"
+      _built_in_grip          — "Yes" / "No"
+      _built_in_stand         — "Yes" / "No"
+      _glitter                — "Yes" / "No"
+      _liquid                 — "Yes" / "No"
+      _card_slot              — "Yes" / "No"
+      _electronics_case_theme — e.g. "Anime & cartoon"
+      _pattern                — e.g. "Animal print"
     """
     primary_color: str = ""
     secondary_color: str = ""
     occasion: str = ""
     holiday: str = ""
-    material: str = ""       # populates _material if column exists in template
-    glitter: str = ""        # "Yes" or "No" — populates _glitter
-    built_in_stand: str = "" # "Yes" or "No" — populates _built_in_stand
+    material: str = ""          # → _material_multi
+    built_in_grip: str = "No"   # → _built-in_grip
+    built_in_stand: str = "Yes" # → _built-in_stand
+    glitter: str = "No"         # → _glitter
+    liquid: str = "No"          # → _liquid
+    card_slot: str = "No"       # → _card_slot
+    electronics_case_theme: str = "Anime & cartoon"  # → _electronics_case_theme
+    pattern: str = "Animal print"                    # → _pattern
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "CategoryProperties":
@@ -45,9 +53,14 @@ class CategoryProperties:
             secondary_color=d.get("_secondary_color", ""),
             occasion=d.get("_occasion", ""),
             holiday=d.get("_holiday", ""),
-            material=d.get("_material", ""),
-            glitter=d.get("_glitter", ""),
-            built_in_stand=d.get("_built_in_stand", ""),
+            material=d.get("_material_multi", "") or d.get("_material", ""),
+            built_in_grip=d.get("_built_in_grip", "No"),
+            built_in_stand=d.get("_built_in_stand", "Yes"),
+            glitter=d.get("_glitter", "No"),
+            liquid=d.get("_liquid", "No"),
+            card_slot=d.get("_card_slot", "No"),
+            electronics_case_theme=d.get("_electronics_case_theme", "Anime & cartoon"),
+            pattern=d.get("_pattern", "Animal print"),
         )
 
 

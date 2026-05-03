@@ -11,7 +11,7 @@
 
   "category": "Clothing > Women's Clothing > Tops & Tees > T-Shirts",
 
-  "who_made": "someone_else",
+  "who_made": "i_did",
   "is_made_to_order": false,
   "year_made": "2024",
   "is_vintage": false,
@@ -43,9 +43,7 @@
     "_secondary_color": "Pink",
     "_occasion": "",
     "_holiday": "",
-    "_material": "Silicone",
-    "_glitter": "",
-    "_built_in_stand": ""
+    "_material_multi": "Silicone"
   },
 
   "keyword_seeds": ["handmade", "unique gift", "birthday present"],
