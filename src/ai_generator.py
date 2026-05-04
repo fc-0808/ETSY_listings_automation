@@ -6,18 +6,53 @@ Each product folder represents ONE phone case product (multiple images = differe
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import re
 import time
 from pathlib import Path
 
 from openai import OpenAI
+from pydantic import BaseModel
 
 from src.config import Config
 from src.models import GeneratedCopy, ProductMeta, ProductPackage
 
 log = logging.getLogger(__name__)
+
+
+# ── Pydantic schemas for Phase 1 Structured Outputs ──────────────────────────
+# Using client.beta.chat.completions.parse guarantees every field is present
+# with the correct type — no missing keys, no bad casts, no JSON parse errors.
+
+class _ImageClass(BaseModel):
+    index: int
+    description: str
+    accessory_reasoning: str  # explicit chain-of-thought before booleans — reduces hallucinations
+    has_grip: bool
+    has_charm: bool
+    has_case: bool
+    is_edge_or_profile: bool
+    has_magsafe_ring: bool
+    grip_shape: str
+    thumbnail_quality: int
+
+class _ProductSummary(BaseModel):
+    character_name: str
+    case_primary_color: str
+    case_secondary_color: str
+    design_features: str
+
+class _Phase1Response(BaseModel):
+    product_summary: _ProductSummary
+    image_classifications: list[_ImageClass]
+
+class _Phase2Response(BaseModel):
+    title: str
+    description: str
+    tags: list[str]
+    primary_color: str
+    secondary_color: str
+
 
 _MAX_RETRIES = 3
 _RETRY_DELAY = 5.0
@@ -175,21 +210,24 @@ def _call_openai(
     images_to_send = image_paths[:10]
     image_blocks = _encode_images(images_to_send)
 
-    # ── Phase 1: Visual Classification ────────────────────────────────────────
+    # ── Phase 1: Visual Classification + Product Summary ─────────────────────
     log.info("Phase 1 — visual classification (%d images)", len(image_blocks))
-    image_analysis = _phase1_classify_images(client, cfg, len(image_blocks), image_blocks)
+    image_analysis, product_summary = _phase1_classify_images(
+        client, cfg, len(image_blocks), image_blocks
+    )
 
     # Build style_image_mapping algorithmically from Phase 1 facts
     style_map = _derive_style_mapping(image_analysis)
-    log.info("Phase 1 complete — style_map: %s",
+    log.info("Phase 1 complete — character=%r, style_map: %s",
+             product_summary.get("character_name", "?"),
              {k: v for k, v in style_map.items() if v})
 
-    # ── Phase 2: SEO Copy Generation ──────────────────────────────────────────
-    log.info("Phase 2 — SEO copy generation")
-    raw_copy = _phase2_generate_copy(client, cfg, meta, image_blocks, image_analysis)
+    # ── Phase 2: SEO Copy Generation (text-only — images NOT re-sent) ────────
+    log.info("Phase 2 — SEO copy generation (text-only)")
+    phase2_result = _phase2_generate_copy(client, cfg, meta, image_analysis, product_summary)
 
     # ── Merge Phase 1 + Phase 2 into final GeneratedCopy ──────────────────────
-    return _parse_response(raw_copy, meta, cfg.brand_tags,
+    return _parse_response(phase2_result, meta, cfg.brand_tags,
                            image_analysis=image_analysis,
                            style_image_mapping=style_map)
 
@@ -203,19 +241,25 @@ def _phase1_classify_images(
     cfg: Config,
     n_images: int,
     image_blocks: list[dict],
-) -> list[dict]:
+) -> tuple[list[dict], dict]:
     """
     Runs a dedicated, focused classification pass over all product images.
-    Returns a list of per-image fact dicts validated against their descriptions.
+
+    Returns (image_classifications, product_summary) where:
+      image_classifications — list of per-image fact dicts (with boolean correction applied)
+      product_summary       — dict with character_name, case colors, and design_features
+                              ready to inject into Phase 2 as text (no images re-sent)
+
+    Uses client.beta.chat.completions.parse (Structured Outputs) so every field
+    is guaranteed to be present with the correct type — no JSON parsing errors.
     """
     system = (
         "You are a precise visual QA analyst for e-commerce phone case products. "
-        "Your ONLY task is to classify each image provided. "
+        "Your tasks: (1) classify each image, (2) summarise the product for SEO copywriting. "
         "Do NOT write any marketing copy, titles, tags, or product descriptions. "
-        "Return ONLY a valid JSON object — no markdown, no extra text."
+        "Return ONLY valid JSON matching the required schema — no markdown, no extra text."
     )
 
-    # Build numbered image content
     content: list[dict] = [{"type": "text", "text": _build_phase1_user_prompt(n_images)}]
     for i, block in enumerate(image_blocks, 1):
         content.append({"type": "text", "text": f"\nIMAGE {i}:"})
@@ -231,26 +275,44 @@ def _phase1_classify_images(
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             if is_reasoning:
-                resp = client.chat.completions.create(
+                resp = client.beta.chat.completions.parse(
                     model=cfg.openai_model,
                     messages=messages,
-                    max_completion_tokens=4000,
-                    response_format={"type": "json_object"},
+                    max_completion_tokens=8000,
+                    reasoning_effort="medium",
+                    response_format=_Phase1Response,
                 )
             else:
-                resp = client.chat.completions.create(
+                resp = client.beta.chat.completions.parse(
                     model=cfg.openai_model,
                     messages=messages,
-                    temperature=0.0,   # deterministic — classification is not creative
+                    temperature=0.0,
                     max_tokens=4000,
-                    response_format={"type": "json_object"},
+                    response_format=_Phase1Response,
                 )
-            raw = resp.choices[0].message.content or ""
-            result = _parse_phase1_response(raw, n_images)
-            if result:
+
+            parsed = resp.choices[0].message.parsed
+            if parsed is None:
+                log.warning(
+                    "Phase 1 attempt %d/%d: parsed is None — %s",
+                    attempt, _MAX_ATTEMPTS,
+                    "retrying" if attempt < _MAX_ATTEMPTS else "giving up",
+                )
+                continue
+
+            image_analysis = _apply_boolean_correction(parsed.image_classifications, n_images)
+            product_summary = {
+                "character_name":      parsed.product_summary.character_name,
+                "case_primary_color":  parsed.product_summary.case_primary_color,
+                "case_secondary_color": parsed.product_summary.case_secondary_color,
+                "design_features":     parsed.product_summary.design_features,
+            }
+
+            if image_analysis:
                 if attempt > 1:
                     log.info("Phase 1 succeeded on retry attempt %d/%d", attempt, _MAX_ATTEMPTS)
-                return result
+                return image_analysis, product_summary
+
             log.warning(
                 "Phase 1 attempt %d/%d returned empty classification — %s",
                 attempt, _MAX_ATTEMPTS,
@@ -262,8 +324,9 @@ def _phase1_classify_images(
                 attempt, _MAX_ATTEMPTS, exc,
                 "retrying" if attempt < _MAX_ATTEMPTS else "giving up",
             )
-    log.error("Phase 1 classification failed after %d attempts — continuing with empty analysis", _MAX_ATTEMPTS)
-    return []
+
+    log.error("Phase 1 failed after %d attempts — continuing with empty analysis", _MAX_ATTEMPTS)
+    return [], {}
 
 
 def _build_phase1_user_prompt(n_images: int) -> str:
@@ -274,15 +337,19 @@ STEP 1 — CLASSIFY EACH IMAGE
 ════════════════════════════════════════════════════════════
 For EACH image produce one JSON object with EXACTLY these fields, in this order:
 
-  "index"              — integer: the image number (1 to {n_images})
-  "description"        — string: ONE sentence. Describe the back of the case, ANY grip/disc/socket visible, ANY charm/beads/cord dangling, camera angle, and the main character/color. WRITE THIS FIRST before filling boolean fields.
-  "has_grip"           — boolean: true ONLY if your description explicitly mentions a grip / popsocket / disc / socket / holder on the BACK of the case. Must match description.
-  "has_charm"          — boolean: true ONLY if your description explicitly mentions charm / beads / lanyard / cord / strap / dangling / hanging. Must match description.
-  "has_case"           — boolean: true if the phone case body is visible in the image.
-  "is_edge_or_profile" — boolean: true if camera angle shows the side / edge / profile of the case (NOT a flat front/back view).
-  "has_magsafe_ring"   — boolean: true if a circular ring or ring outline is visible on the back of the case.
-  "grip_shape"         — string: brief shape description if grip present ("pear", "star", "circle", "strawberry", "liquid shaker", etc.), else "".
-  "thumbnail_quality"  — integer 1–10: image quality as a product thumbnail (10 = sharp, well-lit, full product clearly visible; 1 = blurry, cropped, or poor framing).
+  "index"               — integer: the image number (1 to {n_images})
+  "description"         — string: ONE sentence describing the overall image.
+  "accessory_reasoning" — string: CRITICAL. Explicitly state what accessories are visible.
+                          Example (grip + charm): "I see a bunny-shaped grip on the back. I see a beaded wristlet dangling from the corner."
+                          Example (none):         "Hand holding case. No grip attached. No charm dangling. No beads or cord visible."
+                          Example (edge shot):    "Side-profile edge view. Case bumper is visible. No grip. No charm. The dark sleeve is the person's hand, not a strap."
+  "has_grip"            — boolean: true ONLY if accessory_reasoning explicitly mentions a grip/popsocket.
+  "has_charm"           — boolean: true ONLY if accessory_reasoning explicitly mentions charm/beads/cord.
+  "has_case"            — boolean: true if the phone case body is visible in the image.
+  "is_edge_or_profile"  — boolean: true if camera angle shows the side / edge / profile of the case.
+  "has_magsafe_ring"    — boolean: true if a circular ring outline is visible on the back.
+  "grip_shape"          — string: brief shape description if grip present, else "".
+  "thumbnail_quality"   — integer 1–10: image quality as a product thumbnail.
 
 ────────────────────────────────────────────────────────────
 VISUAL REFERENCE — GRIP (has_grip):
@@ -290,61 +357,80 @@ VISUAL REFERENCE — GRIP (has_grip):
   • Popsocket / PopGrip — a circular or shaped disc that extends outward
   • Ring holder — a looped metal ring or finger ring
   • Shaped grips — pear, star, heart, strawberry, flower, bottle, shaker, etc.
-  • Appears as a bump, protrusion, button, dome, or platform on the case surface
-  • May be centered or offset lower on the case back
   ✔ has_grip = true  → see a raised disc, socket, ring, or shaped bump on the back
   ✗ has_grip = false → case back is clean / flat / no visible protrusion
 
 VISUAL REFERENCE — CHARM (has_charm):
-  A CHARM is any hanging accessory attached to the case:
-  • Bead strands / pearl chains / crystal beads dangling from the bottom/corner
-  • Lanyard / strap / cord looped through or attached to the case
-  • Pendant, tassel, or ornament swinging free
+  A CHARM is any hanging accessory attached to the case (beads, pearls, lanyard).
   ✔ has_charm = true  → see beads, cord, or hanging accessory connected to case
-  ✗ has_charm = false → no hanging items visible, or only the case is present
+  ✗ has_charm = false → no hanging items visible
+  ⚠️ CRITICAL WARNING: Do NOT confuse a person's hand, fingers, or a dark sleeve
+     with a charm or strap. A charm MUST be a distinct physical object (beads, chain,
+     cord) clearly hanging off the case — not skin, clothing, or the case's own bumper.
 
 VISUAL REFERENCE — EDGE/PROFILE (is_edge_or_profile):
-  ✔ is_edge_or_profile = true  → camera angle shows side thickness, bumper edge, or the case is tilted so you view it from the side
-  ✗ is_edge_or_profile = false → flat-on view of the front or back face
+  ✔ is_edge_or_profile = true  → camera shows side thickness, bumper, or tilted edge
+  ✗ is_edge_or_profile = false → flat-on view of front or back face
+  ⚠️ CRITICAL WARNING: Do NOT hallucinate a charm just because the side bumper or
+     a person's sleeve is visible in an edge shot. Edge shots almost never have charms.
 
 ────────────────────────────────────────────────────────────
 CONSISTENCY RULE (mandatory):
-  • Description contains "grip" / "popsocket" / "disc" / "socket" / "protrusion"
-    → has_grip MUST be true.
-  • Description contains "no grip" / "bare back" / "clean back" / "smooth back"
-    → has_grip MUST be false.
-  • Description contains "charm" / "dangling" / "beads" / "lanyard" / "hanging"
-    → has_charm MUST be true.
-  • Description contains "no charm" / "no lanyard" / "no beads" / "no hanging"
-    → has_charm MUST be false.
+  • accessory_reasoning contains "grip" / "popsocket" / "disc" → has_grip MUST be true.
+  • accessory_reasoning contains "no grip" / "bare back" / "clean back" → has_grip MUST be false.
+  • accessory_reasoning contains "charm" / "dangling" / "beads" → has_charm MUST be true.
+  • accessory_reasoning contains "no charm" / "no beads" / "no cord" → has_charm MUST be false.
 
 ════════════════════════════════════════════════════════════
 STEP 2 — SELF-VERIFICATION (mandatory before returning)
 ════════════════════════════════════════════════════════════
 After classifying ALL images, review your results:
 
-  1. GRIP CHECK: Count images where has_grip = true.
-     • If the count is 0 — re-examine every image. If ANY product photo shows a
-       raised disc, bump, shaped protrusion, or popsocket on the case back, that
-       image must have has_grip = true. Update any misses now.
-     • If the count > 0 — verify each has_grip=true image really shows a grip;
-       if the description says "clean back" or "no grip", correct has_grip to false.
+  1. Verify you did NOT mark has_charm = true just because a hand or sleeve appears.
+  2. Verify you did NOT mark has_grip = true on an edge/profile shot unless a grip is
+     clearly popping out of the back in that shot.
+  3. Confirm you have exactly {n_images} entries, one per image, all fields present.
 
-  2. CHARM CHECK: Count images where has_charm = true.
-     • If the count is 0 — re-examine every image. If ANY product photo shows
-       dangling beads, cord, strap, or pendant, set has_charm = true. Update any misses.
+════════════════════════════════════════════════════════════
+STEP 3 — PRODUCT SUMMARY (fill AFTER classifying all images)
+════════════════════════════════════════════════════════════
+Examine ALL images together and fill the "product_summary" object:
 
-  3. COMPLETENESS CHECK: Confirm you have exactly {n_images} entries, one per image,
-     each with all 9 required fields. Fill any missing entries before returning.
+  "character_name"       — Exact character(s) on the case. Be specific:
+                           Sanrio: Cinnamoroll, Kuromi, My Melody, Hello Kitty, Pompompurin, Pochacco
+                           San-X: Rilakkuma, Korilakkuma, Kiiroitori, Sumikko Gurashi
+                           Original animals: Pink Bunny, White Bear, Yellow Dog, Frog, Duck, Angel, etc.
+                           Multiple characters → join with " & ".
+                           Cannot identify → "kawaii character"
+
+  "case_primary_color"   — Dominant background color of the case body. MUST be exactly one of:
+                           Beige, Black, Blue, Bronze, Brown, Clear, Copper, Gold, Gray,
+                           Green, Orange, Pink, Purple, Rainbow, Red, Rose gold, Silver, White, Yellow
+
+  "case_secondary_color" — Second most visible color (character body, grip, charm, or accent).
+                           MUST be exactly one of the same Etsy-allowed list above.
+
+  "design_features"      — Notable visual details for SEO copywriting, e.g.:
+                           "clear back, glitter star accents, MagSafe ring confirmed"
+                           "translucent pink back, pear liquid shaker grip with floating stars"
+                           Mention: clear/transparent back, glitter, 3D elements, printed patterns,
+                           special grip theme, charm bead colors, any text or logo on the case.
+                           Empty string if no notable features beyond a plain case.
 
 ════════════════════════════════════════════════════════════
 OUTPUT FORMAT
 ════════════════════════════════════════════════════════════
-Return a single JSON object with ONE key — no markdown, no commentary:
+Return a JSON object with TWO top-level keys — no markdown, no commentary:
 {{
+  "product_summary": {{
+    "character_name": "Cinnamoroll",
+    "case_primary_color": "White",
+    "case_secondary_color": "Blue",
+    "design_features": "clear back, MagSafe ring confirmed"
+  }},
   "image_classifications": [
-    {{ "index": 1, "description": "...", "has_grip": true, "has_charm": false, "has_case": true,
-       "is_edge_or_profile": false, "has_magsafe_ring": true, "grip_shape": "pear", "thumbnail_quality": 8 }},
+    {{ "index": 1, "description": "...", "accessory_reasoning": "...", "has_grip": true, "has_charm": false,
+       "has_case": true, "is_edge_or_profile": false, "has_magsafe_ring": true, "grip_shape": "pear", "thumbnail_quality": 8 }},
     ...
   ]
 }}
@@ -352,19 +438,16 @@ Return a single JSON object with ONE key — no markdown, no commentary:
 Classify ALL {n_images} images. One object per image in ascending index order."""
 
 
-def _parse_phase1_response(raw: str, n_images: int) -> list[dict]:
-    """Parse Phase 1 JSON and apply description-level validation to booleans."""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        log.warning("Phase 1 returned non-JSON: %s", raw[:200])
-        return []
+def _apply_boolean_correction(items: list[_ImageClass], n_images: int) -> list[dict]:
+    """
+    Apply description-driven boolean correction to Pydantic-parsed Phase 1 results.
 
-    items = data.get("image_classifications", [])
-    if not isinstance(items, list):
-        log.warning("Phase 1: image_classifications is not a list")
-        return []
-
+    Combines both description and accessory_reasoning text fields — the model was
+    forced to write its visual logic in accessory_reasoning before committing to
+    booleans, so both fields together form the most reliable signal.
+    Negative phrases take priority over positive keywords to prevent hallucination
+    (e.g. "no charm" beats "string" found elsewhere in the text).
+    """
     _CHARM_KW  = ("charm", "dangling", "dangle", "lanyard", "beads", "beaded",
                   "cord", "strap hanging", "hanging strap", "string", "tassel",
                   "wristlet", "pendant", "hanging")
@@ -378,39 +461,36 @@ def _parse_phase1_response(raw: str, n_images: int) -> list[dict]:
 
     result: list[dict] = []
     for item in items:
-        if not isinstance(item, dict):
-            continue
         try:
-            idx         = int(item.get("index", 0))
-            desc        = str(item.get("description", "")).strip()
-            has_grip    = bool(item.get("has_grip",  False))
-            has_charm   = bool(item.get("has_charm", False))
-            desc_lower  = desc.lower()
+            # Combine description + accessory_reasoning for maximum signal coverage
+            combined_text = f"{item.description} {item.accessory_reasoning}".lower()
+            has_grip  = item.has_grip
+            has_charm = item.has_charm
 
-            # Description-driven boolean correction (trust the chain-of-thought)
-            if any(p in desc_lower for p in _NO_CHARM):
+            # Negative phrases override first (prevents finger/sleeve hallucinations)
+            if any(p in combined_text for p in _NO_CHARM):
                 has_charm = False
-            elif any(k in desc_lower for k in _CHARM_KW):
+            elif any(k in combined_text for k in _CHARM_KW):
                 has_charm = True
 
-            if any(p in desc_lower for p in _NO_GRIP):
+            if any(p in combined_text for p in _NO_GRIP):
                 has_grip = False
-            elif any(k in desc_lower for k in _GRIP_KW):
+            elif any(k in combined_text for k in _GRIP_KW):
                 has_grip = True
 
             result.append({
-                "index":              idx,
-                "description":        desc,
+                "index":              item.index,
+                "description":        item.description,
                 "has_grip":           has_grip,
                 "has_charm":          has_charm,
-                "has_case":           bool(item.get("has_case", True)),
-                "is_edge_or_profile": bool(item.get("is_edge_or_profile", False)),
-                "has_magsafe_ring":   bool(item.get("has_magsafe_ring", False)),
-                "grip_shape":         str(item.get("grip_shape", "") or "").strip(),
-                "thumbnail_quality":  int(item.get("thumbnail_quality", 5)),
+                "has_case":           item.has_case,
+                "is_edge_or_profile": item.is_edge_or_profile,
+                "has_magsafe_ring":   item.has_magsafe_ring,
+                "grip_shape":         item.grip_shape,
+                "thumbnail_quality":  item.thumbnail_quality,
                 # Legacy fields expected by xlsx_builder
                 "is_held_in_hand":    False,
-                "shows_back_of_case": not bool(item.get("is_edge_or_profile", False)),
+                "shows_back_of_case": not item.is_edge_or_profile,
             })
         except (ValueError, TypeError):
             continue
@@ -481,53 +561,58 @@ def _phase2_generate_copy(
     client: OpenAI,
     cfg: Config,
     meta: ProductMeta,
-    image_blocks: list[dict],
     image_analysis: list[dict],
-) -> str:
+    product_summary: dict,
+) -> _Phase2Response:
     """
     Generate SEO copy (title, description, tags, colors) using Phase 1
-    classification facts as structured context. Images are re-sent so the
-    model can see character details, colors, and MagSafe ring.
+    classification facts and product summary as pure text context.
+
+    No images are re-sent — character name, colors, and design details were
+    captured by Phase 1 and injected via product_summary.  This cuts the
+    per-listing vision token cost by ~50% and speeds up the call significantly.
+
+    Uses client.beta.chat.completions.parse with _Phase2Response so every
+    output field is guaranteed to exist with the correct type — no JSON parse
+    errors, no missing keys, no hallucinatory formatting.
     """
-    system_prompt = _build_system_prompt(cfg.shop_name, cfg.brand_tags)
-    user_prompt   = _build_user_prompt(meta, cfg.brand_tags, image_analysis)
-
-    content: list[dict] = [{"type": "text", "text": user_prompt}]
-
-    # Resend images with labels so model can see characters/colors/MagSafe details
-    content.append({"type": "text", "text": (
-        f"\n\n═══ {len(image_blocks)} PRODUCT IMAGES ═══\n"
-        "Classification from Phase 1 is provided above. "
-        "Use the images ONLY to identify character names, colors, MagSafe ring, "
-        "and design details for writing copy. Do NOT reclassify — trust Phase 1 facts.\n"
-    )})
-    for i, block in enumerate(image_blocks, 1):
-        content.append({"type": "text", "text": f"\nIMAGE {i}:"})
-        content.append(block)
+    _TEXT_ONLY_PREAMBLE = (
+        "OVERRIDE — TEXT-ONLY MODE: All image analysis was completed in Phase 1. "
+        "Character name, colors, and design details are provided in the PRODUCT SUMMARY "
+        "in the user message. Use the PRODUCT SUMMARY directly for all character "
+        "identification, primary_color, secondary_color, and design detail decisions. "
+        "Trust all Phase 1 classification facts completely.\n\n"
+    )
+    system_prompt = _TEXT_ONLY_PREAMBLE + _build_system_prompt(cfg.shop_name, cfg.brand_tags)
+    user_prompt   = _build_user_prompt(meta, cfg.brand_tags, image_analysis, product_summary)
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": content},
+        {"role": "user",   "content": user_prompt},
     ]
 
     is_reasoning = _is_reasoning_model(cfg.openai_model)
     if is_reasoning:
-        resp = client.chat.completions.create(
+        resp = client.beta.chat.completions.parse(
             model=cfg.openai_model,
             messages=messages,
-            max_completion_tokens=12000,
-            response_format={"type": "json_object"},
+            max_completion_tokens=16000,
             reasoning_effort="medium",
+            response_format=_Phase2Response,
         )
     else:
-        resp = client.chat.completions.create(
+        resp = client.beta.chat.completions.parse(
             model=cfg.openai_model,
             messages=messages,
             temperature=0.4,
             max_tokens=4800,
-            response_format={"type": "json_object"},
+            response_format=_Phase2Response,
         )
-    return resp.choices[0].message.content or ""
+
+    parsed = resp.choices[0].message.parsed
+    if not parsed:
+        raise ValueError("Phase 2 returned an empty or invalid parsed response.")
+    return parsed
 
 
 def _is_reasoning_model(model: str) -> bool:
@@ -556,271 +641,31 @@ def _build_system_prompt(shop_name: str = "Y2KASEshop", brand_tags: list[str] | 
         + _tags_display + "\n"
     )
     _PROMPT_KEYS = (
-        '\nYou MUST return ONLY a valid JSON object with exactly seven keys:'
-        ' "title", "description", "tags", "primary_color", "secondary_color",'
-        ' "style_image_mapping", "image_analysis".\n'
-        'Omitting style_image_mapping or image_analysis is a critical failure.\n'
+        '\nYou MUST return ONLY a valid JSON object with exactly FIVE keys:'
+        ' "title", "description", "tags", "primary_color", "secondary_color".\n'
+        'Do NOT include style_image_mapping or image_analysis — those are handled by Phase 1.\n'
     )
     return _PROMPT_HEADER + _PROMPT_KEYS + """No markdown. No code fences. No extra text outside the JSON.
 
 ═══════════════════════════════════════
-STEP 1 — METICULOUS IMAGE ANALYSIS (do this silently before writing)
+STEP 1 — TITLE (CRITICAL — 140 CHARS MAX)
 ═══════════════════════════════════════
-Examine every pixel of every provided image. Identify and note:
-
-1. CHARACTER(S): Identify the exact character(s) on the case.
-   - San-X: Rilakkuma, Korilakkuma, Kiiroitori, Sumikko Gurashi, Cinnamoroll, Pompompurin
-   - Sanrio: My Melody, Kuromi, Hello Kitty, Pochacco
-   - Animals / originals: dog, bunny, bear, cat, frog, duck, puppy, etc.
-   - Look for text/logos on the case itself
-   - Note the CHARACTER'S COLOR (yellow dog, pink bunny, white bear, etc.)
-
-2. ██████████ MAGSAFE DETECTION — READ THIS RULE THREE TIMES ██████████
-
-   RULE (1 of 3): Look at the BACK of every case image. A MagSafe ring is a circular
-   ring, often white or silver, embedded in the center of the back panel. It may be
-   subtle. It may appear as a slight raised circle or a visible ring outline.
-   IF YOU SEE IT → the title MUST include "MAGSAFE" in ALL CAPS.
-   IF YOU DO NOT SEE IT → do NOT claim MagSafe.
-
-   RULE (2 of 3): Examine EVERY image carefully before concluding no ring exists.
-   Some images show the back clearly; others show only the front or sides.
-   If ANY image shows a circular ring on the back → include MAGSAFE.
-   Do NOT skip this check. Missing a visible MagSafe ring is a critical error.
-
-   RULE (3 of 3): The MagSafe ring is the single most important SEO keyword for this
-   product category. If the ring is present and you fail to include "MAGSAFE" in the
-   title, the listing will rank significantly lower in search. Check every image twice.
-   When in doubt and a circular element is visible on the back → include MAGSAFE.
-
-   ████████████████████████████████████████████████████████████████████
-
-3. ACCESSORIES — examine carefully:
-   - GRIP: Pop socket / grip / phone holder? What shape/theme? (pear, strawberry, star, bunny, ball, liquid shaker, etc.)
-   - CHARM: Beaded wristlet / charm / lanyard?
-   - CAMERA RING: Decorative bezel/ring around the camera cutout?
-
-4. COLORS — examine the case carefully. You will output these as "primary_color" and "secondary_color".
-   - PRIMARY COLOR: The dominant/background color of the case body itself.
-   - SECONDARY COLOR: The second most visible color (character, grip, charm, accents).
-   You MUST map BOTH to EXACTLY ONE value from this Etsy-allowed list:
-   Beige, Black, Blue, Bronze, Brown, Clear, Copper, Gold, Gray, Green,
-   Orange, Pink, Purple, Rainbow, Red, Rose gold, Silver, White, Yellow
-   Mapping guide: Clear/transparent→"Clear" | Light pink→"Pink" | Dark red→"Red"
-   | Lilac/lavender→"Purple" | Tan/cream→"Beige" | Multiple equal colors→"Rainbow"
-   NEVER invent a color not on that list. Always pick the closest match.
-
-5. DESIGN FEATURES: 3D elements? Glitter? Stars? Bows? Flowers? Hearts?
-
-6. ████ STYLE IMAGE MAPPING — EXAMINE EVERY IMAGE WITH EXTREME VISUAL PRECISION ████
-
-   Before classifying, train your eye on these EXACT visual elements:
-
-   ─────────────────────────────────────────────────────────────
-   VISUAL DETECTION GUIDE — ACCESSORIES
-   ─────────────────────────────────────────────────────────────
-   A) THE GRIP (popsocket / phone holder / finger ring):
-      - A circular, oval, or shaped FLAT DISC or POP-UP SOCKET on the BACK of the phone case
-      - Usually attached to the center of the back
-      - May be themed: pear shape, strawberry, bunny, star, etc.
-      - Can be popped up (3D, standing off the case) or flat against the case
-      - LOOK: Is there a round/shaped protrusion on the back of the case? = GRIP PRESENT
-      - If you see ANY circular disc, pop socket, or holder on the back → GRIP IS PRESENT
-
-   B) THE CHARM (wristlet / lanyard / beaded strap):
-      - A string, cord, or chain hanging from the case
-      - Usually has beads, a pendant, or decorative elements
-      - Hangs off one corner or a loop on the case
-      - LOOK: Is there anything dangling/hanging from the case? = CHARM PRESENT
-
-   ─────────────────────────────────────────────────────────────
-   CLASSIFICATION RULES (apply in this exact order per image):
-   ─────────────────────────────────────────────────────────────
-
-   "Case+Grip+Charm": Grip IS present AND charm IS hanging from the case
-                      → Both accessories clearly visible together
-
-   "Case+Grip":       Grip IS present on the back, charm is NOT hanging
-                      → You see the grip disc/socket, no dangling beads
-
-   "Case+Charm":      Charm IS hanging, NO grip disc/socket on the back
-                      → Dangling beads/lanyard, clean back without popsocket
-
-   "Case Only":       ████ STRICTLY — NO grip, NO charm, NOTHING ATTACHED ████
-                      → The back of the case is completely bare/clean
-                      → No disc, no popsocket, no dangling strap whatsoever
-                      → If you see even a shadow of a grip → NOT Case Only
-                      → Common for: close-up back shots, packaging shots,
-                        flat-lay of just the case, or showing the MagSafe ring
-
-   "Case Only (edge)": Same as Case Only (strictly NO grip, NO charm) BUT the camera
-                        angle shows the EDGE, SIDE PROFILE, or BENT CURVE of the case
-                        → These are less flattering shots: side profiles, tilted edge views,
-                          shots showing the thickness or the border/bumper of the case
-                        → Typically used to show case thickness or fit
-                        → MUST still have NO grip and NO charm attached
-
-   "Grip Only":       The grip/popsocket is DETACHED and shown by itself
-                      → No phone case in the image, or grip clearly separated
-
-   "Charm Only":      The charm/lanyard/beads shown alone, detached
-                      → ALWAYS assign empty list []. Never link to an image.
-
-   ─────────────────────────────────────────────────────────────
-   MULTI-STEP VERIFICATION SYSTEM
-   ─────────────────────────────────────────────────────────────
-
-   VERIFICATION PASS 1 — Accessory Detection (answer for EACH image):
-   ┌──────────────────────────────────────────────────────────────────────┐
-   │ A) Grip present?  Look for a circular/shaped DISC on the case BACK.  │
-   │    Pear, star, strawberry, bunny shapes = grip. Flat ring = grip.    │
-   │    If ANYTHING is stuck to the back center → GRIP = YES              │
-   │                                                                      │
-   │ B) Charm present? Look for DANGLING beads/cord from the case corner. │
-   │    Hanging strap, pearl strand, lanyard, keychain = CHARM = YES      │
-   │                                                                      │
-   │ C) Is this the CASE or a standalone accessory?                       │
-   └──────────────────────────────────────────────────────────────────────┘
-
-   VERIFICATION PASS 2 — Angle Quality (only for Case Only images):
-   ┌──────────────────────────────────────────────────────────────────────┐
-   │ NICE angle: Camera faces the FRONT or BACK of the case flat-on.     │
-   │   → You can clearly see the case design, artwork, or characters.    │
-   │   → Classify as "Case Only"                                         │
-   │                                                                      │
-   │ EDGE angle: Camera is aimed at the SIDE, PROFILE, or TILTED EDGE.  │
-   │   → You see the case thickness, bumper, or a bent/curved view.     │
-   │   → Classify as "Case Only (edge)"                                  │
-   └──────────────────────────────────────────────────────────────────────┘
-
-   VERIFICATION PASS 3 — Final Cross-Check:
-   ┌──────────────────────────────────────────────────────────────────────┐
-   │ Re-examine every image you classified as "Case Only" or             │
-   │ "Case Only (edge)". Ask again: Is there ANY circular disc, pop      │
-   │ socket, or holder ANYWHERE in the frame? If YES → reclassify as    │
-   │ Case+Grip, Case+Grip+Charm, or Case+Charm accordingly.             │
-   │                                                                      │
-   │ Re-examine every "Case+Grip" image. Confirm: do you see the grip?  │
-   │ If the grip is NOT actually visible → reclassify as Case Only.     │
-   └──────────────────────────────────────────────────────────────────────┘
-
-   ─────────────────────────────────────────────────────────────
-   CLASSIFICATION DECISION TABLE:
-   ─────────────────────────────────────────────────────────────
-   Grip=YES + Charm=YES + Case=YES   → "Case+Grip+Charm"
-   Grip=YES + Charm=NO  + Case=YES   → "Case+Grip"
-   Grip=NO  + Charm=YES + Case=YES   → "Case+Charm"
-   Grip=NO  + Charm=NO  + Case=YES + Nice angle  → "Case Only"
-   Grip=NO  + Charm=NO  + Case=YES + Edge angle  → "Case Only (edge)"
-   Grip=YES + Case=NO (standalone)   → "Grip Only"
-   Charm only visible, no case       → "Charm Only"
-
-   ─────────────────────────────────────────────────────────────
-   OUTPUT — lists of 1-based indices, BEST/MOST REPRESENTATIVE FIRST:
-   ─────────────────────────────────────────────────────────────
-   "style_image_mapping": {
-     "Case+Grip+Charm": [3, 1],        ← multiple angles welcome
-     "Case+Grip":       [2, 5, 8],     ← best grip shot first, others after
-     "Case+Charm":      [4],
-     "Case Only":       [6, 7],        ← nice flat front/back shots ONLY
-     "Case Only (edge)":[9, 10],       ← side/profile/edge shots ONLY
-     "Grip Only":       [],
-     "Charm Only":      []             ← ALWAYS empty
-   }
-   RULES:
-   - Same index cannot appear in two styles.
-   - "Charm Only" and "Grip Only" are ALWAYS empty lists [].
-   - Unclassifiable (packaging cards, brand cards) → omit entirely.
-   - Within each list, put the BEST/MOST REPRESENTATIVE image FIRST.
-
-═══════════════════════════════════════
-STEP 7 — IMAGE_ANALYSIS (STRUCTURED PER-IMAGE FACTS — MOST CRITICAL)
-═══════════════════════════════════════
-
-This is the MOST IMPORTANT output. The system uses these facts to classify
-images for variation style linking. Structured facts are deterministic and reliable.
-
-For EACH image (1, 2, 3, ... N), produce an object with these fields IN THIS ORDER:
-
-{
-  "index": 1,
-  "description": "...",          ← FIRST: Write a 1-2 sentence detailed description of what
-                                    you SEE in this image. Mention every visible element:
-                                    case color, what's on the back, anything attached,
-                                    anything dangling, how it's held, etc.
-                                    EXAMPLE: "Yellow phone case held in a hand showing the
-                                    front. A pear-shaped grip is mounted on the back of the
-                                    case. A small yellow beaded charm dangles from the
-                                    bottom-right corner via a thin string."
-                                    EXAMPLE: "Yellow phone case shown back-facing with a
-                                    pear-shaped grip in the center. NO charm or strap
-                                    visible anywhere. Clean back composition."
-  "has_grip": true,              ← After describing, set true ONLY if your description
-                                    mentioned a grip/popsocket/disc/holder.
-  "has_charm": true,             ← After describing, set true ONLY if your description
-                                    mentioned charm/dangling/lanyard/beads/string/strap.
-                                    Even a SUBTLE charm in any corner = true.
-  "has_case": true,
-  "is_edge_or_profile": false,
-  "is_held_in_hand": false,
-  "shows_back_of_case": true,
-  "thumbnail_quality": 8         ← 1-10. Hero quality matters most for thumbnail decisions.
-}
-
-═════ CRITICAL: DESCRIPTION-FIRST CHAIN OF THOUGHT ═════
-
-You MUST write the "description" field FIRST for each image, BEFORE filling in the
-boolean fields. The description forces you to actually examine each image carefully.
-This is the most important rule in this entire prompt.
-
-CONSISTENCY CHECK (your output will be validated):
-  → If your description mentions "charm", "dangling", "lanyard", "beads",
-    "strap", "hanging", "string" → has_charm MUST be true.
-  → If your description mentions "grip", "popsocket", "disc", "holder",
-    "ring" on the back → has_grip MUST be true.
-  → If your description says "no charm", "no grip", "clean back", "bare back"
-    → those features are false.
-
-Lying to yourself by writing a description with charm visible but setting
-has_charm=false will result in WRONG ordering. ALWAYS make the booleans
-match what you described.
-
-═════ OUTPUT FORMAT ═════
-
-"image_analysis": [
-  {"index": 1, "has_grip": true, "has_charm": true, "has_case": true,
-   "is_edge_or_profile": false, "is_held_in_hand": true, "shows_back_of_case": false,
-   "thumbnail_quality": 9},
-  {"index": 2, "has_grip": true, "has_charm": false, "has_case": true,
-   "is_edge_or_profile": false, "is_held_in_hand": true, "shows_back_of_case": true,
-   "thumbnail_quality": 10},
-  ...
-]
-
-   - One object per image, in numerical order by index
-   - EVERY image in the folder gets an entry
-   - Fields are deterministic facts (booleans/integers), NOT subjective opinions
-   - thumbnail_quality is the only subjective field — use it to rank within categories
-
-═══════════════════════════════════════
-STEP 2 — TITLE (CRITICAL — 140 CHARS MAX)
-═══════════════════════════════════════
-Structure: [Character+Color] [MAGSAFE if ring visible] Case [with Accessory], [Style] [Color] Cover iPhone 17 16 15 14 13 Pro Max, [Aesthetic] Gift
+Structure: [Character+Color] [MAGSAFE if confirmed] Case [with Accessory], [Style] [Color] Cover iPhone 17 16 15 14 13 Pro Max, [Aesthetic] Gift
 
 RULES:
-- Include "MAGSAFE" IN ALL CAPS only if the magnetic ring is visible in the images (see Step 1 rule above — checked 3 times)
-- Front-load most powerful keywords in first 40 characters
+- Include "MAGSAFE" IN ALL CAPS only if the magnetic ring is confirmed in the Phase 1 product summary.
+- Front-load most powerful keywords in first 40 characters.
 - Target EXACTLY 140 characters. Never below 130.
-- Zero fluff: no "A", "The", "Beautiful", "Amazing"
-- Separate keyword phrases with commas
-- Include: iPhone 17 16 15 14 13 Pro Max
-- Include character name, accessory name, aesthetic (Kawaii, Y2K, Coquette)
+- Zero fluff: no "A", "The", "Beautiful", "Amazing".
+- Separate keyword phrases with commas.
+- Include: iPhone 17 16 15 14 13 Pro Max.
+- Include character name, accessory name, aesthetic (Kawaii, Y2K, Coquette).
 
 EXAMPLE: "Cute Rilakkuma MAGSAFE Case with Strawberry Shaker Grip & Charm, Kawaii Pink Clear Cover iPhone 17 16 15 14 13 Pro Max, Y2K Coquette Gift"
 (adapt for your product — do NOT copy this example verbatim)
 
 ═══════════════════════════════════════
-STEP 3 — DESCRIPTION (MANDATORY FORMAT — FOLLOW EXACTLY — MINIMUM 500 WORDS)
+STEP 2 — DESCRIPTION (MANDATORY FORMAT — FOLLOW EXACTLY — MINIMUM 500 WORDS)
 ═══════════════════════════════════════
 
 ⚠️ ABSOLUTE RULES — violating ANY of these is a critical failure:
@@ -830,19 +675,19 @@ STEP 3 — DESCRIPTION (MANDATORY FORMAT — FOLLOW EXACTLY — MINIMUM 500 WORD
 4. The first 160 characters MUST be maximum keyword-density — this is the Google + Etsy meta snippet.
 5. Weave these keyword types NATURALLY throughout EVERY paragraph (not stuffed — woven):
    → Character name | Y2K aesthetic | kawaii | cute iPhone case | [accessory type] | aesthetic phone case
-6. Every [BRACKET] placeholder MUST be replaced with the actual product-specific content from the images.
+6. Every [BRACKET] placeholder MUST be replaced with actual product-specific content from the Phase 1 product summary.
 
 SEO DEPTH REQUIREMENT: Each of the opening paragraphs must include at least 3 distinct high-value
 search phrases. Long-tail phrases ("kawaii iPhone case with pear grip", "Y2K aesthetic phone charm",
 "cute [character] phone case gift") outperform single keywords and must appear throughout the copy.
 
 MAGSAFE DESCRIPTION RULE (CRITICAL):
-→ IF MagSafe ring was CONFIRMED in Step 1:
+→ IF MagSafe ring is confirmed in Phase 1:
    - The opening hook line MUST include "MagSafe" (e.g. "...this [character] MagSafe iPhone case...")
    - Paragraph 2 (product uniqueness) MUST mention the built-in magnetic ring explicitly:
      e.g. "The case features a built-in white MagSafe ring for seamless wireless charging."
    - Key Features MUST include the MagSafe bullet.
-→ IF MagSafe ring was NOT confirmed: do NOT mention MagSafe anywhere in the description.
+→ IF MagSafe ring is NOT confirmed: do NOT mention MagSafe anywhere in the description.
 
 --- START OF REQUIRED DESCRIPTION FORMAT ---
 
@@ -850,26 +695,26 @@ MAGSAFE DESCRIPTION RULE (CRITICAL):
 
 [PARAGRAPH 1 — AESTHETIC & DESIRE — 3-4 sentences. Embrace the full emotional fantasy. Name the character. Reference the aesthetic (Y2K, kawaii, coquette). Use vivid, desire-creating language. MUST include: "kawaii phone case", "[character] case", "Y2K aesthetic", "cute iPhone case" or synonyms woven in naturally. End with a reason to buy it as a gift or treat.]
 
-[PARAGRAPH 2 — PRODUCT UNIQUENESS — 3-4 sentences. Start with something like "This isn't just a phone case — it's a complete [character] experience." Describe the actual decal/artwork visible on the case: character design, colors, any special print details (glitter, 3D elements, clear back, MagSafe ring if visible). Mention the soft TPU/silicone material and how the clear back lets the phone's color complement the artwork. MUST include at least 2 of: "clear iPhone case", "silicone phone case", "[character] design", "cute phone case", "kawaii [character]".]
+[PARAGRAPH 2 — PRODUCT UNIQUENESS — 3-4 sentences. Start with something like "This isn't just a phone case — it's a complete [character] experience." Describe the actual decal/artwork from the Phase 1 product summary: character design, colors, any special print details (glitter, 3D elements, clear back, MagSafe ring if confirmed). Mention the soft TPU/silicone material and how the clear back lets the phone's color complement the artwork. MUST include at least 2 of: "clear iPhone case", "silicone phone case", "[character] design", "cute phone case", "kawaii [character]".]
 
-[IF GRIP VISIBLE — PARAGRAPH 3: Start with something like "The absolute star of the show is the attachable [grip name]..." Describe the grip in vivid detail: exact shape (pear, bunny, strawberry, etc.), any liquid shaker effect and what floats inside, the character theming. Explain it is removable and compatible with standard PopSocket mounts. MUST include: "[shape] grip", "phone grip", "popsocket".]
+[IF GRIP CONFIRMED IN PHASE 1 — PARAGRAPH 3: Start with something like "The absolute star of the show is the attachable [grip name]..." Describe the grip in vivid detail: exact shape (pear, bunny, strawberry, etc.), any liquid shaker effect and what floats inside, the character theming. Explain it is removable and compatible with standard PopSocket mounts. MUST include: "[shape] grip", "phone grip", "popsocket".]
 
-[IF CHARM VISIBLE — PARAGRAPH 4: Describe the beaded charm in detail: bead colors, any pendant character or decorative element, how it attaches to the case loop. Explain it functions as a wristlet strap. MUST include: "beaded charm", "phone wristlet" or "wristlet charm", "beaded strap".]
+[IF CHARM CONFIRMED IN PHASE 1 — PARAGRAPH 4: Describe the beaded charm in detail: bead colors, any pendant character or decorative element, how it attaches to the case loop. Explain it functions as a wristlet strap. MUST include: "beaded charm", "phone wristlet" or "wristlet charm", "beaded strap".]
 
 ✨ Key Features
 
-[BULLET LIST — EXACTLY 5–7 bullets. Only features CONFIRMED VISIBLE in the images. Zero fabrication.
+[BULLET LIST — EXACTLY 5–7 bullets. Only features CONFIRMED IN PHASE 1 CLASSIFICATION. Zero fabrication.
 Format STRICTLY as: "Feature Name: One full descriptive sentence with natural keyword integration."
 Each bullet MUST be on its own line with a blank line between bullets for readability.
 
 REQUIRED bullets (include these when applicable):
-• [Character] Kawaii Design: [Describe the specific artwork — character name, color, pose or expression, any special print detail visible on the case back.]
+• [Character] Kawaii Design: [Describe the specific artwork — character name, color, pose or expression, any special print detail from the Phase 1 product summary.]
 • Soft TPU Silicone Protection: Flexible, shock-absorbent silicone body provides excellent drop protection while keeping your phone ultra-lightweight and easy to grip.
 • Raised Edge Bezels: Slightly elevated lip around the screen and camera module protects against face-down scratches and drops.
 • Precise Cutouts: Perfectly fitted openings for all buttons, speakers, charging port, and camera — no signal interference, no fumbling.
-IF MAGSAFE VISIBLE → • MagSafe Compatible: Features a built-in white magnetic ring for seamless MagSafe charging and full compatibility with all MagSafe accessories.
-IF GRIP VISIBLE    → • [Shape] [Grip Name]: [Describe in full detail — shape, color, shaker liquid effect if present, what floats inside, character theming. State it is removable and PopSocket-compatible.]
-IF CHARM VISIBLE   → • Hand-Beaded Wristlet Charm: [Describe bead colors, pendant, arrangement. State it attaches to the case loop and functions as a secure wristlet strap.]
+IF MAGSAFE CONFIRMED → • MagSafe Compatible: Features a built-in white magnetic ring for seamless MagSafe charging and full compatibility with all MagSafe accessories.
+IF GRIP CONFIRMED    → • [Shape] [Grip Name]: [Describe in full detail — shape, color, shaker liquid effect if present, what floats inside, character theming. State it is removable and PopSocket-compatible.]
+IF CHARM CONFIRMED   → • Hand-Beaded Wristlet Charm: [Describe bead colors, pendant, arrangement. State it attaches to the case loop and functions as a secure wristlet strap.]
 • Perfect Kawaii Gift: Comes beautifully packaged — ideal as a birthday gift, Valentine's gift, Christmas present, or a well-deserved self-treat for any Y2K or kawaii aesthetic lover.]
 
 📱 Device Compatibility
@@ -922,23 +767,23 @@ FINAL CHECKLIST before outputting (verify each):
 □ IF MAGSAFE NOT CONFIRMED: the word "MagSafe" does NOT appear anywhere in the description
 □ Paragraph 1 contains "kawaii phone case", the character's name, and "Y2K aesthetic"
 □ Paragraph 2 contains "This isn't just a phone case" style opening and product-specific artwork details
-□ All [BRACKET] placeholders replaced with actual product content from the images
-□ Grip paragraph present IF grip is visible in images
-□ Charm paragraph present IF charm is visible in images
+□ All [BRACKET] placeholders replaced with actual product content from the Phase 1 summary
+□ Grip paragraph present IF grip is confirmed in Phase 1 classification
+□ Charm paragraph present IF charm is confirmed in Phase 1 classification
 □ Key Features: 5–7 bullets, each on its own line with blank line between
 □ Device Compatibility: each series on its own paragraph with blank line between
 □ What's Included: each bundle option on its own line with blank line between
 □ Total word count ≥ 500 words
 
 ═══════════════════════════════════════
-STEP 4 — TAGS (EXACTLY 13 — RESEARCH-VERIFIED SEO INTENSITY)
+STEP 3 — TAGS (EXACTLY 13 — RESEARCH-VERIFIED SEO INTENSITY)
 ═══════════════════════════════════════
 
 CRITICAL RULES:
 - Exactly 13 tags. Not 12. Not 14. Exactly 13.
 - Each tag: maximum 20 characters INCLUDING spaces.
 - All lowercase only. Real search terms buyers type. No punctuation except hyphens.
-- Every tag must be directly relevant to THIS specific product in the images.
+- Every tag must be directly relevant to THIS specific product.
 
 TAG STRATEGY — 5 research-verified tiers (fill in order):
 
@@ -966,13 +811,13 @@ TIER 5 — PRODUCT SPECIFIC + BUYER INTENT (fill remaining 4 slots):
     → "aesthetic phone case"  (20 chars ✓)
     → "kawaii iphone case"    (18 chars ✓)
     → "coquette phone case"   (19 chars ✓)
-  SLOT B — Character/product specific tag (from what you see in images):
+  SLOT B — Character/product specific tag (from the Phase 1 product summary):
     → "[character name] case"  e.g. "rilakkuma case", "bunny iphone case", "angel phone case"
-  SLOT C — Accessory tag (ONLY if that accessory is CONFIRMED VISIBLE in images):
-    IF charm visible  → "beaded phone charm"   (18 chars ✓)
-    IF charm visible  → "phone wristlet"       (14 chars ✓)
-    IF grip visible   → "phone grip kawaii"    (17 chars ✓)
-    IF no accessory   → "kawaii gift for her"  (19 chars ✓)
+  SLOT C — Accessory tag (ONLY if that accessory is CONFIRMED IN PHASE 1):
+    IF charm confirmed  → "beaded phone charm"   (18 chars ✓)
+    IF charm confirmed  → "phone wristlet"       (14 chars ✓)
+    IF grip confirmed   → "phone grip kawaii"    (17 chars ✓)
+    IF no accessory     → "kawaii gift for her"  (19 chars ✓)
   SLOT D — Gift intent tag (always eligible):
     → "cute gift for her"     (17 chars ✓ — high-converting gift intent tag)
     → "kawaii gift for her"   (19 chars ✓)
@@ -991,10 +836,10 @@ VERIFICATION: Count every tag. Measure every tag ≤ 20 chars. Total must = 13.
 ═══════════════════════════════════════
 ABSOLUTE PROHIBITIONS
 ═══════════════════════════════════════
-- NEVER claim MagSafe or include "MAGSAFE" unless the magnetic ring is visually confirmed in images
+- NEVER claim MagSafe or include "MAGSAFE" unless confirmed in the Phase 1 summary
 - NEVER list Plus or Mini iPhone models as compatible
 - NEVER list Samsung or Android
-- NEVER fabricate accessories not shown in images
+- NEVER fabricate accessories not confirmed in the Phase 1 classification
 - NEVER start the description with "What's Included" or any section header
 - NEVER write a description shorter than 300 words
 - NEVER use a color value for primary_color or secondary_color that is not in the allowed list:
@@ -1007,11 +852,12 @@ def _build_user_prompt(
     meta: ProductMeta,
     brand_tags: list[str] | None = None,
     image_analysis: list[dict] | None = None,
+    product_summary: dict | None = None,
 ) -> str:
     """
-    Phase 2 user prompt. When image_analysis (Phase 1 results) is provided,
-    the structured classification facts are injected as context so the model
-    writes more accurate copy without needing to re-classify images.
+    Phase 2 user prompt. Injects Phase 1 classification facts and the product
+    summary (character name, colors, design features) as text so the model
+    writes accurate copy without re-analysing any images.
     """
     lines: list[str] = [
         "Generate an SEO-optimized Etsy listing for this phone case product.",
@@ -1034,6 +880,17 @@ def _build_user_prompt(
 
     if meta.extra_notes:
         lines.append(f"Additional notes: {meta.extra_notes}")
+
+    # ── Inject product summary (character, colors, design — from Phase 1) ─────
+    if product_summary:
+        lines += [
+            "",
+            "=== PRODUCT SUMMARY (from Phase 1 vision — use directly, do not re-analyse images) ===",
+            f"Character: {product_summary.get('character_name', 'kawaii character')}",
+            f"Primary Color: {product_summary.get('case_primary_color', '')}",
+            f"Secondary Color: {product_summary.get('case_secondary_color', '')}",
+            f"Design Features: {product_summary.get('design_features', '')}",
+        ]
 
     # ── Inject Phase 1 classification facts ───────────────────────────────────
     if image_analysis:
@@ -1067,8 +924,14 @@ def _build_user_prompt(
     lines += [
         "",
         "=== YOUR TASK ===",
-        "1. Identify the CHARACTER(S) visible in the images — be specific (Cinnamoroll, Kuromi, My Melody, Rilakkuma, original character, etc.).",
-        "2. Use ONLY the Phase 1 facts above for MagSafe/grip/charm decisions — do NOT second-guess them.",
+        "1. " + (
+            "Use the PRODUCT SUMMARY above for the character name, colors, and design details "
+            "— all visual analysis is already complete. Do NOT attempt to identify these from images."
+            if product_summary else
+            "Identify the CHARACTER(S) and colors from the product details above — be specific "
+            "(Cinnamoroll, Kuromi, My Melody, Rilakkuma, original character, etc.)."
+        ),
+        "2. Use ONLY the Phase 1 classification facts above for MagSafe/grip/charm decisions — do NOT second-guess them.",
         "3. Write the title, description, and tags following ALL system prompt rules exactly.",
         "",
         "Return ONLY a valid JSON object with EXACTLY these FIVE top-level keys "
@@ -1109,23 +972,19 @@ _ETSY_COLORS = {
 
 
 def _parse_response(
-    raw: str,
+    parsed_data: _Phase2Response,
     meta: ProductMeta,
     brand_tags: list[str] | None = None,
     image_analysis: list[dict] | None = None,
     style_image_mapping: dict[str, list[int]] | None = None,
 ) -> GeneratedCopy:
     """
-    Parse Phase 2 JSON output into a GeneratedCopy.
-    When image_analysis and style_image_mapping are passed in (from Phase 1),
-    they are used directly — Phase 2 JSON keys for those fields are ignored.
+    Convert the Pydantic Phase 2 object into a GeneratedCopy.
+    Phase 1 data (image_analysis and style_image_mapping) is injected directly.
+    All fields are guaranteed present and correctly typed by Pydantic — no JSON
+    parsing, no missing-key guards, no JSONDecodeError possible.
     """
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"OpenAI returned non-JSON: {raw[:200]}") from exc
-
-    title = str(data.get("title", "")).strip()
+    title = str(parsed_data.title).strip()
 
     # Enforce 140-char limit — truncate at word boundary if AI exceeded it
     if len(title) > 140:
@@ -1141,18 +1000,15 @@ def _parse_response(
             title = " ".join(title.split())
             log.info("Title: deduplicated '%s' → using '%s' for extras", char, replacement)
 
-    description = str(data.get("description", "")).strip()
-    raw_tags = data.get("tags", [])
+    description = str(parsed_data.description).strip()
 
-    if not isinstance(raw_tags, list):
-        raw_tags = re.split(r"[,\n]", str(raw_tags))
-
-    tags = [_clean_tag(t) for t in raw_tags if str(t).strip()]
+    # Pydantic guarantees tags is list[str] — no isinstance fallback needed.
+    tags = [_clean_tag(t) for t in parsed_data.tags if str(t).strip()]
     tags = [t for t in tags if t][:13]
     tags = _ensure_shop_tags(tags, brand_tags or [])
 
-    primary_color   = _validate_color(data.get("primary_color", ""))
-    secondary_color = _validate_color(data.get("secondary_color", ""))
+    primary_color   = _validate_color(parsed_data.primary_color)
+    secondary_color = _validate_color(parsed_data.secondary_color)
 
     # ── Use Phase 1 data when provided; fall back to parsing JSON fields ──────
     final_image_analysis: list[dict] = image_analysis if image_analysis else []

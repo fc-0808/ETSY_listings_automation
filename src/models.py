@@ -39,12 +39,12 @@ class CategoryProperties:
     holiday: str = ""
     material: str = ""          # → _material_multi
     built_in_grip: str = "No"   # → _built-in_grip
-    built_in_stand: str = "Yes" # → _built-in_stand
+    built_in_stand: str = "No"  # → _built-in_stand
     glitter: str = "No"         # → _glitter
     liquid: str = "No"          # → _liquid
     card_slot: str = "No"       # → _card_slot
-    electronics_case_theme: str = "Anime & cartoon"  # → _electronics_case_theme
-    pattern: str = "Animal print"                    # → _pattern
+    electronics_case_theme: str = ""  # → _electronics_case_theme (leave blank — Etsy allowed values are template-specific)
+    pattern: str = ""                 # → _pattern (leave blank — Etsy allowed values are template-specific)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "CategoryProperties":
@@ -55,12 +55,12 @@ class CategoryProperties:
             holiday=d.get("_holiday", ""),
             material=d.get("_material_multi", "") or d.get("_material", ""),
             built_in_grip=d.get("_built_in_grip", "No"),
-            built_in_stand=d.get("_built_in_stand", "Yes"),
+            built_in_stand=d.get("_built_in_stand", "No"),
             glitter=d.get("_glitter", "No"),
             liquid=d.get("_liquid", "No"),
             card_slot=d.get("_card_slot", "No"),
-            electronics_case_theme=d.get("_electronics_case_theme", "Anime & cartoon"),
-            pattern=d.get("_pattern", "Animal print"),
+            electronics_case_theme=d.get("_electronics_case_theme", ""),
+            pattern=d.get("_pattern", ""),
         )
 
 

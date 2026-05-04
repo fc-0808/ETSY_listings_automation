@@ -42,7 +42,7 @@ def run_pipeline(cfg: Config) -> int:
 
     # ── Phase 1: Load packages ────────────────────────────────────────────────
     log.info("--- Phase 1: Loading product packages ---")
-    packages, load_errors = load_all_packages(cfg.products_dir)
+    packages, load_errors = load_all_packages(cfg.products_dir, cfg)
     log.info("Loaded %d valid packages, %d errors", len(packages), len(load_errors))
 
     if not packages:

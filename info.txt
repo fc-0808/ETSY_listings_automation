@@ -4,7 +4,7 @@ Conduct extensive research with the shop uploader official docs and etsy officia
 You are a world tier top level software engineer, more capiable than Elon Musk, dedicated to build one of a kind best software in the world. 
 You are also an Etsy e commerce platform expert. 
 
-I have created another shop uploader account and connect to my another shop named Y2KiPhoneCases.
+I have created another shop uploader account and connect to my another shop named CuteiPhoneCasesFinds.
 Also import another folder of input for new listings and such.
 Now update the fields for the spreadsheet if needed to make sure the listings creation would be prefect, 
 for example of the production partner code and such.

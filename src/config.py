@@ -21,11 +21,19 @@ def _default_shop_uploader_template() -> Path:
     return legacy
 
 
+def _default_products_dir() -> Path:
+    override = os.getenv("PRODUCTS_DIR", "").strip()
+    if override:
+        p = Path(override)
+        return p if p.is_absolute() else (ROOT_DIR / p)
+    return ROOT_DIR / "input"
+
+
 @dataclass
 class Config:
     # ── OpenAI ───────────────────────────────────────────────────────────────
     openai_api_key: str = field(default_factory=lambda: _require("OPENAI_API_KEY"))
-    openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4.1"))
+    openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.4-mini"))
 
     # ── Cloudinary (image hosting) ────────────────────────────────────────────
     cloudinary_cloud_name: str = field(default_factory=lambda: _require("CLOUDINARY_CLOUD_NAME"))
@@ -34,8 +42,8 @@ class Config:
     cloudinary_folder: str = field(default_factory=lambda: os.getenv("CLOUDINARY_FOLDER", "etsy_products"))
 
     # ── Pipeline defaults ────────────────────────────────────────────────────
-    # Drop product folders into input/ — that is the default working directory.
-    products_dir: Path = field(default_factory=lambda: ROOT_DIR / "input")
+    # Override with PRODUCTS_DIR=input/IPlistings_0503 (relative to repo root or absolute).
+    products_dir: Path = field(default_factory=_default_products_dir)
     output_dir: Path = field(default_factory=lambda: ROOT_DIR / "output")
     # Shop Uploader workbook whose row 1 defines column order (per shop / category set).
     # Override with SHOP_UPLOADER_TEMPLATE=my_template.xlsx (relative to repo root or absolute).
@@ -47,11 +55,26 @@ class Config:
     # Human-readable shop/batch label used in output filenames (e.g. "Y2KASEshop")
     run_label: str = field(default_factory=lambda: os.getenv("RUN_LABEL", ""))
     # Shop display name used in the listing description Promise section and run label.
-    # Set SHOP_NAME=Y2KASEshop in your .env (or override per-run).
+    # Set SHOP_NAME=Y2KASEowo in your .env (or override per-run).
     shop_name: str = field(default_factory=lambda: os.getenv("SHOP_NAME", "Y2KASEshop"))
     # Comma-separated brand identity tags forced into every listing's tag list.
     # Default is derived from shop_name; override with BRAND_TAGS=tag1,tag2 in .env.
     brand_tags: list = field(default_factory=lambda: _default_brand_tags())
+
+    # ── Shop-level Etsy / Shop Uploader IDs ──────────────────────────────────
+    # Set these once per shop in .env — they are used as fallbacks when a
+    # product's meta.json leaves the field blank, so you never need to repeat
+    # the same ID in every single meta.json file.
+    #
+    # How to find these values:
+    #   • Log into Shop Uploader → Shop page → copy the ID shown next to each item
+    #   • Or export any existing listing from that shop and read the column value
+    #
+    production_partner_id: str = field(default_factory=lambda: os.getenv("PRODUCTION_PARTNER_ID", ""))
+    shipping_profile_id:   str = field(default_factory=lambda: os.getenv("SHIPPING_PROFILE_ID", ""))
+    return_policy_id:      str = field(default_factory=lambda: os.getenv("RETURN_POLICY_ID", ""))
+    readiness_state_id:    str = field(default_factory=lambda: os.getenv("READINESS_STATE_ID", ""))
+    shop_section_id:       str = field(default_factory=lambda: os.getenv("SHOP_SECTION_ID", ""))
 
     def __post_init__(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)

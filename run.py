@@ -91,7 +91,7 @@ def main() -> None:
         from src.loader import load_all_packages
         from src.image_uploader import configure_cloudinary
         configure_cloudinary(cfg)
-        packages, load_errors = load_all_packages(cfg.products_dir)
+        packages, load_errors = load_all_packages(cfg.products_dir, cfg)
         for e in load_errors:
             log.warning(e)
         errors = upload_all_packages(packages, cfg, force_reupload=True)
@@ -108,7 +108,7 @@ def _run_dry(cfg) -> None:
     log = logging.getLogger(__name__)
     log.info("=== DRY RUN — load and validate only ===")
     from src.loader import load_all_packages
-    packages, errors = load_all_packages(cfg.products_dir)
+    packages, errors = load_all_packages(cfg.products_dir, cfg)
 
     if errors:
         log.warning("Issues found:")
