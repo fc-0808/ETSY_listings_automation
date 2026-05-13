@@ -6,6 +6,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src._etsy_allowed import (
+    CATEGORY_RE as _CATEGORY_RE,
+    COLORS as _COLORS,
+    HOLIDAYS as _HOLIDAYS,
+    MATERIALS as _MATERIALS,
+    OCCASIONS as _OCCASIONS,
+    closest_match as _closest,
+)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm", ".m4v"}
@@ -45,6 +53,37 @@ class CategoryProperties:
     card_slot: str = "No"       # → _card_slot
     electronics_case_theme: str = ""  # → _electronics_case_theme (leave blank — Etsy allowed values are template-specific)
     pattern: str = ""                 # → _pattern (leave blank — Etsy allowed values are template-specific)
+
+    def validate(self) -> list[str]:
+        errors: list[str] = []
+        if self.material and self.material not in _MATERIALS:
+            hint = _closest(self.material, _MATERIALS)
+            suggestion = f" Closest matches: {hint}." if hint else ""
+            errors.append(
+                f"_material_multi '{self.material}' is not in Etsy's allowed list.{suggestion} "
+                f"Check src/_etsy_allowed.py → MATERIALS for all valid values."
+            )
+        if self.primary_color and self.primary_color not in _COLORS:
+            errors.append(
+                f"_primary_color '{self.primary_color}' is not valid. "
+                f"Allowed: {sorted(_COLORS)}"
+            )
+        if self.secondary_color and self.secondary_color not in _COLORS:
+            errors.append(
+                f"_secondary_color '{self.secondary_color}' is not valid. "
+                f"Allowed: {sorted(_COLORS)}"
+            )
+        if self.occasion and self.occasion not in _OCCASIONS:
+            errors.append(
+                f"_occasion '{self.occasion}' is not valid. "
+                f"Allowed: {sorted(_OCCASIONS)}"
+            )
+        if self.holiday and self.holiday not in _HOLIDAYS:
+            errors.append(
+                f"_holiday '{self.holiday}' is not valid. "
+                f"Allowed: {sorted(_HOLIDAYS)}"
+            )
+        return errors
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "CategoryProperties":
@@ -213,6 +252,15 @@ class ProductMeta:
             errors.append("return_policy_id is required for physical listings")
         if self.type == "physical" and not self.readiness_state_id:
             errors.append("readiness_state_id is required for physical listings (processing time profile ID from Etsy)")
+        # ── Category format ───────────────────────────────────────────────────
+        if self.category and not _CATEGORY_RE.match(self.category):
+            errors.append(
+                f"category '{self.category}' must be in Shop Uploader's 'Name (ID)' format, "
+                f"e.g. 'Phone Cases (873)'. "
+                f"Export any live listing from Shop Uploader to find the exact string."
+            )
+        # ── Attribute allowed values ──────────────────────────────────────────
+        errors.extend(self.category_properties.validate())
         return errors
 
 
@@ -252,6 +300,19 @@ class GeneratedCopy:
         for tag in self.tags:
             if len(tag) > 20:
                 errors.append(f"tag '{tag[:30]}' exceeds 20-char limit")
+        # ── AI-generated colors must be valid Etsy values ─────────────────────
+        if self.primary_color and self.primary_color not in _COLORS:
+            hint = _closest(self.primary_color, _COLORS)
+            errors.append(
+                f"AI returned primary_color '{self.primary_color}' which is not a valid Etsy color. "
+                f"Closest: {hint}. Allowed: {sorted(_COLORS)}"
+            )
+        if self.secondary_color and self.secondary_color not in _COLORS:
+            hint = _closest(self.secondary_color, _COLORS)
+            errors.append(
+                f"AI returned secondary_color '{self.secondary_color}' which is not a valid Etsy color. "
+                f"Closest: {hint}. Allowed: {sorted(_COLORS)}"
+            )
         return errors
 
 

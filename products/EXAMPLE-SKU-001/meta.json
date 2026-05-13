@@ -9,7 +9,7 @@
 
   "type": "physical",
 
-  "category": "Clothing > Women's Clothing > Tops & Tees > T-Shirts",
+  "category": "Phone Cases (873)",
 
   "who_made": "i_did",
   "is_made_to_order": false,
@@ -54,7 +54,14 @@
 
   "_VARIATIONS_NOTE": "Delete this key before production. Remove entirely to disable variations (single-row listing). Keep to generate one row per style×model combination.",
   "variations": {
-    "option1_name": "Style",
+    "option1_name": "Phone Model",
+    "models": [
+      "iPhone 17 Pro Max", "iPhone 17 Pro", "iPhone 17",
+      "iPhone 16 Pro Max", "iPhone 16 Pro", "iPhone 16",
+      "iPhone 15 Pro Max", "iPhone 15 Pro", "iPhone 15",
+      "iPhone 14 Pro Max", "iPhone 14 Pro", "iPhone 14/13"
+    ],
+    "option2_name": "Style",
     "styles": [
       {"value": "Case+Grip+Charm", "price": 409.89, "quantity": 3, "sku_code": "CGM"},
       {"value": "Case+Grip",        "price": 350.11, "quantity": 3, "sku_code": "CG"},
@@ -62,13 +69,6 @@
       {"value": "Case Only",        "price": 261.86, "quantity": 3, "sku_code": "CO"},
       {"value": "Grip Only",        "price": 170.76, "quantity": 3, "sku_code": "GO"},
       {"value": "Charm Only",       "price": 113.82, "quantity": 3, "sku_code": "CH"}
-    ],
-    "option2_name": "Phone Model",
-    "models": [
-      "iPhone 17 Pro Max", "iPhone 17 Pro", "iPhone 17",
-      "iPhone 16 Pro Max", "iPhone 16 Pro", "iPhone 16",
-      "iPhone 15 Pro Max", "iPhone 15 Pro", "iPhone 15",
-      "iPhone 14 Pro Max", "iPhone 14 Pro", "iPhone 14/13"
     ]
   }
 }
